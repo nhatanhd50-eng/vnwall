@@ -216,19 +216,31 @@ else:
     st.warning("⚠️ Đang chờ dữ liệu từ máy chủ...")
 
 # ==============================================================================
-# 7. TỰ ĐỘNG CHẠY LẠI (RANDOM 60s - 90s)
+# 7. TỰ ĐỘNG CHẠY LẠI (CÓ ĐẾM NGƯỢC)
 # ==============================================================================
+
+# Random thời gian nghỉ từ 60 đến 90 giây
 sleep_seconds = random.randint(60, 90)
+
+# Tính giờ cập nhật tiếp theo (để hiển thị cố định)
 next_time = datetime.datetime.now(CURRENT_TZ) + datetime.timedelta(seconds=sleep_seconds)
 next_str = next_time.strftime('%H:%M:%S')
 
+# Tạo khung chứa nội dung đếm ngược
 placeholder = st.empty()
-with placeholder.container():
-    st.markdown(f"""
-        <div class="status-bar">
-            ⏳ Tự động cập nhật sau <b>{sleep_seconds} giây</b>... (Dự kiến: {next_str})
-        </div>
-    """, unsafe_allow_html=True)
 
-time.sleep(sleep_seconds)
+# Vòng lặp đếm ngược từng giây
+for i in range(sleep_seconds, 0, -1):
+    with placeholder.container():
+        st.markdown(f"""
+            <div class="status-bar">
+                ⏳ Tự động cập nhật sau <b style="color: #FFD700; font-size: 1.2em;">{i}</b> giây... <br>
+                <span style="color: gray; font-size: 0.8em;">(Dự kiến: {next_str})</span>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    # Ngủ 1 giây rồi lặp lại
+    time.sleep(1)
+
+# Hết giờ -> Tải lại trang
 st.rerun()
