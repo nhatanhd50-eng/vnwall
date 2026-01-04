@@ -5,54 +5,39 @@ import requests
 import datetime
 import random
 from deep_translator import GoogleTranslator
+# Thêm thư viện AI
+from transformers import pipeline
 
 # ==============================================================================
-# 1. CẤU HÌNH TRANG WEB
+# 1. CẤU HÌNH & CSS
 # ==============================================================================
 st.set_page_config(
-    page_title="VnWallStreet Pro",
-    page_icon="🌍",
+    page_title="VnWallStreet Pro + AI",
+    page_icon="🤖",
     layout="centered",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
-# ==============================================================================
-# 2. CSS GIAO DIỆN (PREMIUM DARK MODE)
-# ==============================================================================
 st.markdown("""
     <style>
-    /* Nền chung */
     .stApp { background-color: #0E1117; }
     
-    /* Khung tin tức */
     .news-card {
         background-color: #1F2937;
         padding: 15px;
         border-radius: 12px;
         margin-bottom: 15px;
-        border-left: 5px solid #10B981; /* Xanh lá */
+        border-left: 5px solid #374151; /* Mặc định viền xám */
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-        transition: transform 0.2s;
-    }
-    .news-card:hover {
-        transform: scale(1.01); /* Hiệu ứng phóng to nhẹ khi di chuột */
-        background-color: #374151;
     }
     
-    /* Thời gian */
     .time-badge {
-        background-color: #064E3B;
-        color: #6EE7B7;
-        padding: 4px 8px;
-        border-radius: 6px;
-        font-weight: bold;
+        color: #9CA3AF;
         font-family: 'Consolas', monospace;
         font-size: 0.85em;
-        margin-right: 10px;
-        display: inline-block;
+        margin-right: 8px;
     }
     
-    /* Tiêu đề tin */
     .news-content {
         color: #F3F4F6;
         font-size: 16px;
@@ -60,18 +45,19 @@ st.markdown("""
         font-family: 'Segoe UI', sans-serif;
     }
     
-    /* Thanh trạng thái */
-    .status-bar {
-        text-align: center;
-        color: #9CA3AF;
-        font-size: 0.9em;
-        margin-top: 25px;
-        padding: 10px;
-        border-top: 1px solid #374151;
-        font-style: italic;
+    /* Highlight cho AI Score */
+    .ai-badge {
+        display: inline-block;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.75em;
+        font-weight: bold;
+        color: white;
+        margin-right: 8px;
+        text-transform: uppercase;
+        vertical-align: middle;
     }
     
-    /* Header control panel */
     .control-panel {
         background-color: #1F2937;
         padding: 15px;
@@ -83,164 +69,158 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 3. CẤU HÌNH API
+# 2. KHỞI TẠO AI (CACHE RESOURCE ĐỂ KHÔNG LOAD LẠI)
+# ==============================================================================
+@st.cache_resource
+def load_finbert():
+    """Tải model FinBERT 1 lần duy nhất khi khởi động"""
+    try:
+        # Load pipeline phân tích cảm xúc tài chính
+        pipe = pipeline("text-classification", model="ProsusAI/finbert")
+        return pipe
+    except Exception as e:
+        return None
+
+# ==============================================================================
+# 3. CẤU HÌNH API & HÀM DỊCH
 # ==============================================================================
 SECRET_KEY = "zxadpfiadfjapppasdfdddddddddddddfffffffffffffffffdfa3123123123"
 API_URL = "https://vnwallstreet.com/api/inter/newsFlash/page"
 
-# Header giả lập
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://vnwallstreet.com/"
 }
 
-# ==============================================================================
-# 4. HÀM LẤY TIN
-# ==============================================================================
 def get_news_data():
     try:
         ts = int(time.time() * 1000)
         params = {"limit": 20, "uid": "-1", "start": "0", "token_": "", "key_": SECRET_KEY, "time_": ts}
-        
         sorted_keys = sorted(params.keys())
         query = '&'.join([f"{k}={params[k]}" for k in sorted_keys])
         sign = hashlib.md5(query.encode('utf-8')).hexdigest().upper()
-        
         del params['key_']
         params['sign_'] = sign
-        
         response = requests.get(API_URL, params=params, headers=HEADERS, timeout=5)
-        if response.status_code == 200:
-            return response.json().get('data', [])
+        if response.status_code == 200: return response.json().get('data', [])
         return []
     except: return []
 
+# Cache dịch thuật để tiết kiệm thời gian
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_translate(text, target_lang):
+    if target_lang == 'vi': return text
+    try:
+        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+    except: return text
+
 # ==============================================================================
-# 5. GIAO DIỆN ĐIỀU KHIỂN (CONTROL PANEL)
+# 4. GIAO DIỆN ĐIỀU KHIỂN
 # ==============================================================================
-st.title("🌍 GLOBAL NEWS MONITOR")
+st.title("🤖 VNWALLSTREET PRO + FINBERT")
 
 with st.container():
-    # Tạo khung bao quanh control panel
     st.markdown('<div class="control-panel">', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1.5, 1.5, 1.2])
     
-    col1, col2, col3 = st.columns([1.5, 1.5, 1])
-    
-    with col1:
-        # Chọn Ngôn ngữ
-        LANGUAGES = {
-            "🇻🇳 Tiếng Việt (Gốc)": "vi",
-            "🇬🇧 English (Anh)": "en",
-            "🇫🇷 Français (Pháp)": "fr",
-            "🇯🇵 日本語 (Nhật)": "ja",
-            "🇰🇷 한국어 (Hàn)": "ko",
-            "🇨🇳 中文 (Trung)": "zh-CN",
-            "🇩🇪 Deutsch (Đức)": "de",
-            "🇷🇺 Русский (Nga)": "ru"
-        }
-        selected_lang_label = st.selectbox("🌐 Ngôn ngữ dịch:", list(LANGUAGES.keys()))
+    with c1:
+        LANGUAGES = {"🇻🇳 Tiếng Việt": "vi", "🇬🇧 English (FinBERT Ready)": "en"}
+        selected_lang_label = st.selectbox("Ngôn ngữ:", list(LANGUAGES.keys()), index=1) # Mặc định tiếng Anh
         target_lang = LANGUAGES[selected_lang_label]
 
-    with col2:
-        # Chọn Múi giờ
-        TIMEZONES = {
-            "Vietnam (UTC+7)": 7,
-            "New York (UTC-5)": -5,
-            "London (UTC+0)": 0,
-            "Berlin (UTC+1)": 1,
-            "Moscow (UTC+3)": 3,
-            "Dubai (UTC+4)": 4,
-            "Tokyo (UTC+9)": 9,
-            "Sydney (UTC+11)": 11
-        }
-        selected_tz_label = st.selectbox("🕒 Múi giờ hiển thị:", list(TIMEZONES.keys()))
-        tz_offset = TIMEZONES[selected_tz_label]
-        CURRENT_TZ = datetime.timezone(datetime.timedelta(hours=tz_offset))
-
-    with col3:
-        # Nút Cập nhật
-        st.write("") # Spacer
-        st.write("") 
-        if st.button("🔄 LÀM MỚI", use_container_width=True):
+    with c2:
+        # Toggle bật tắt AI
+        use_ai = st.checkbox("Kích hoạt AI Scoring", value=True)
+        
+    with c3:
+        st.write("")
+        if st.button("🔄 REFRESH", use_container_width=True):
             st.rerun()
             
+    # --- CẢNH BÁO QUAN TRỌNG ---
+    if use_ai and target_lang != 'en':
+        st.warning("⚠️ LƯU Ý: Chế độ AI hoạt động chính xác nhất khi Ngôn ngữ là 'English'. Nếu chọn Tiếng Việt, máy sẽ phải dịch ngầm 2 lần, có thể gây chậm.")
+        
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ==============================================================================
-# 6. XỬ LÝ & HIỂN THỊ DỮ LIỆU
+# 5. LOGIC XỬ LÝ CHÍNH
 # ==============================================================================
 
-# Khởi tạo bộ dịch
-translator = GoogleTranslator(source='auto', target=target_lang)
+# Tải model (hiển thị loading nếu lần đầu chạy)
+with st.spinner("Đang khởi động bộ não FinBERT..."):
+    finbert_pipeline = load_finbert()
 
 news_list = get_news_data()
-current_time_str = datetime.datetime.now(CURRENT_TZ).strftime('%H:%M:%S')
+CURRENT_TZ = datetime.timezone(datetime.timedelta(hours=7)) # UTC+7
 
 if news_list:
-    st.success(f"✅ Đã cập nhật lúc: **{current_time_str}**")
+    st.caption(f"Cập nhật: {datetime.datetime.now(CURRENT_TZ).strftime('%H:%M:%S')}")
     
     for item in news_list:
-        # --- Xử lý Thời Gian ---
+        # 1. Xử lý thời gian
         raw_time = item.get('createtime') or item.get('showtime') or 0
         try:
             raw_time = int(raw_time)
             if raw_time > 1000000000000: raw_time = raw_time / 1000
-            dt_object = datetime.datetime.fromtimestamp(raw_time, CURRENT_TZ)
-            t_str = dt_object.strftime("%H:%M")
+            t_str = datetime.datetime.fromtimestamp(raw_time, CURRENT_TZ).strftime("%H:%M")
         except: t_str = "--:--"
         
-        # --- Xử lý Nội Dung ---
-        original_text = item.get('title') or item.get('content') or ""
-        original_text = original_text.strip()
+        # 2. Xử lý nội dung gốc
+        original_text = (item.get('title') or item.get('content') or "").strip()
         
-        # Dịch thuật (Nếu không phải Tiếng Việt)
-        display_text = original_text
-        if target_lang != 'vi':
+        # 3. Dịch thuật hiển thị
+        display_text = cached_translate(original_text, target_lang)
+        
+        # 4. XỬ LÝ AI FINBERT (Chỉ chạy nếu user bật)
+        ai_badge_html = ""
+        border_color = "#374151" # Màu xám mặc định
+        
+        if use_ai and finbert_pipeline:
             try:
-                # Dịch title
-                display_text = translator.translate(original_text)
-            except: 
-                display_text = original_text # Fallback nếu lỗi dịch
-        
-        # --- Render HTML Card ---
+                # FinBERT BẮT BUỘC cần tiếng Anh
+                # Nếu đang hiển thị tiếng Anh rồi thì lấy luôn, nếu không phải dịch ngầm
+                input_for_ai = display_text if target_lang == 'en' else cached_translate(original_text, 'en')
+                
+                # Chạy model
+                result = finbert_pipeline(input_for_ai)[0]
+                label = result['label'] # positive, negative, neutral
+                score = result['score']
+                
+                # Logic màu sắc
+                if label == 'positive':
+                    badge_color = "#10B981" # Xanh lá
+                    label_text = "BULLISH"
+                    border_color = "#10B981"
+                elif label == 'negative':
+                    badge_color = "#EF4444" # Đỏ
+                    label_text = "BEARISH"
+                    border_color = "#EF4444"
+                else:
+                    badge_color = "#6B7280" # Xám
+                    label_text = "NEUTRAL"
+                    border_color = "#6B7280" # Giữ nguyên xám
+                
+                # Tạo HTML Badge
+                ai_badge_html = f'<span class="ai-badge" style="background-color: {badge_color};">{label_text} {int(score*100)}%</span>'
+                
+            except Exception as e:
+                ai_badge_html = f'<span class="ai-badge" style="background-color: #F59E0B;">AI ERROR</span>'
+
+        # 5. Render ra màn hình
         st.markdown(f"""
-        <div class="news-card">
+        <div class="news-card" style="border-left: 5px solid {border_color};">
             <div>
-                <span class="time-badge">{t_str}</span>
+                <span class="time-badge">[{t_str}]</span>
+                {ai_badge_html}
                 <span class="news-content">{display_text}</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
-        
+
 else:
-    st.warning("⚠️ Đang chờ dữ liệu từ máy chủ...")
+    st.info("Đang chờ dữ liệu...")
 
-# ==============================================================================
-# 7. TỰ ĐỘNG CHẠY LẠI (CÓ ĐẾM NGƯỢC)
-# ==============================================================================
-
-# Random thời gian nghỉ từ 60 đến 90 giây
-sleep_seconds = random.randint(60, 90)
-
-# Tính giờ cập nhật tiếp theo (để hiển thị cố định)
-next_time = datetime.datetime.now(CURRENT_TZ) + datetime.timedelta(seconds=sleep_seconds)
-next_str = next_time.strftime('%H:%M:%S')
-
-# Tạo khung chứa nội dung đếm ngược
-placeholder = st.empty()
-
-# Vòng lặp đếm ngược từng giây
-for i in range(sleep_seconds, 0, -1):
-    with placeholder.container():
-        st.markdown(f"""
-            <div class="status-bar">
-                ⏳ Tự động cập nhật sau <b style="color: #FFD700; font-size: 1.2em;">{i}</b> giây... <br>
-                <span style="color: gray; font-size: 0.8em;">(Dự kiến: {next_str})</span>
-            </div>
-        """, unsafe_allow_html=True)
-    
-    # Ngủ 1 giây rồi lặp lại
-    time.sleep(1)
-
-# Hết giờ -> Tải lại trang
+# Auto reload
+time.sleep(60)
 st.rerun()
