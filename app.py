@@ -137,7 +137,7 @@ def cached_translate(text, target='en'):
 SECRET_KEY = "zxadpfiadfjapppasdfdddddddddddddfffffffffffffffffdfa3123123123"
 API_URL = "https://vnwallstreet.com/api/inter/newsFlash/page"
 
-# Header giả lập (Quan trọng để tránh bị chặn 403)
+# Header giả lập
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://vnwallstreet.com/",
@@ -149,13 +149,12 @@ def get_news_batch():
     try:
         ts = int(time.time() * 1000)
         
-        # --- KHÔI PHỤC ĐẦY ĐỦ THAM SỐ ĐỂ TÍNH SIGNATURE ---
-        # Tuyệt đối không xóa start, token_ vì server cần nó để tính hash
+        # --- KHÔI PHỤC ĐẦY ĐỦ THAM SỐ ---
         params = {
             "limit": 20,
             "uid": "-1",
-            "start": "0",       # <-- Đã khôi phục
-            "token_": "",       # <-- Đã khôi phục
+            "start": "0",       
+            "token_": "",       
             "key_": SECRET_KEY,
             "time_": ts
         }
@@ -209,7 +208,7 @@ with st.expander("⚙️ CẤU HÌNH HỆ THỐNG (SETTINGS)", expanded=True):
         tz_offset = TIMEZONES[sel_tz]
         CURRENT_TZ = datetime.timezone(datetime.timedelta(hours=tz_offset))
 
-    with c3:
+    with col3:
         # Nút bật chế độ Debug
         debug_mode = st.checkbox("🛠 Debug Mode", value=False, help="Hiển thị text tiếng Anh mà AI đang đọc")
         if st.button("🔄 Cập nhật ngay"):
@@ -224,7 +223,7 @@ raw_news = get_news_batch()
 
 if raw_news:
     processed_items = []
-    math_scores = [] # Dùng để tính trung bình cộng Dashboard
+    math_scores = [] 
     
     # Hiển thị Progress Bar
     with st.status("🚀 AI đang quét dữ liệu thị trường...", expanded=True) as status:
@@ -247,22 +246,22 @@ if raw_news:
                 ai_input_text = cached_translate(original_text, 'en')
             
             # 2. FinBERT Analysis
-            ai_res = {"label": "NEUTRAL", "score": 0.0, "color": "#6B7280"} # Mặc định
+            ai_res = {"label": "NEUTRAL", "score": 0.0, "color": "#6B7280"} 
             
             if finbert and ai_input_text:
                 try:
                     res = finbert(ai_input_text)[0]
-                    lbl = res['label'] # positive, negative, neutral
-                    conf_score = res['score'] # Độ tin cậy (0.0 - 1.0)
+                    lbl = res['label'] 
+                    conf_score = res['score'] 
                     
                     if lbl == 'positive':
                         ai_res = {"label": "BULLISH", "score": conf_score, "color": "#10B981"}
-                        math_scores.append(conf_score) # Cộng điểm
+                        math_scores.append(conf_score) 
                     elif lbl == 'negative':
                         ai_res = {"label": "BEARISH", "score": conf_score, "color": "#EF4444"}
-                        math_scores.append(-conf_score) # Trừ điểm
+                        math_scores.append(-conf_score) 
                     else:
-                        # NEUTRAL: Vẫn lưu độ tin cậy để hiển thị, nhưng tính toán = 0
+                        # NEUTRAL: Vẫn lưu score để hiển thị
                         ai_res = {"label": "NEUTRAL", "score": conf_score, "color": "#6B7280"}
                         math_scores.append(0) 
                 except: pass
@@ -279,7 +278,7 @@ if raw_news:
                 "time": time_str,
                 "text": display_text,
                 "ai": ai_res,
-                "debug": ai_input_text # Lưu text gốc tiếng Anh để debug
+                "debug": ai_input_text
             })
             
         status.update(label="✅ Phân tích hoàn tất!", state="complete", expanded=False)
@@ -334,7 +333,6 @@ if raw_news:
 
 else:
     if not raw_news:
-         # Nếu list rỗng mà không có lỗi API, có thể do mạng hoặc server trả về rỗng
          st.warning("⚠️ Không có dữ liệu hoặc Server đang lọc tin.")
 
 # ==============================================================================
