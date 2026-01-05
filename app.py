@@ -15,7 +15,7 @@ except ImportError:
     AI_AVAILABLE = False
 
 # ==============================================================================
-# 1. CẤU HÌNH & CSS (DARK MODE PREMIUM)
+# 1. CẤU HÌNH & CSS (PREMIUM DARK UI)
 # ==============================================================================
 st.set_page_config(
     page_title="VnWallStreet AI Terminal",
@@ -29,7 +29,7 @@ st.markdown("""
     /* Nền đen Deep Dark */
     .stApp { background-color: #0b0f19; }
     
-    /* DASHBOARD */
+    /* DASHBOARD TỔNG HỢP */
     .dashboard-box {
         background: linear-gradient(145deg, #1f2937, #111827);
         padding: 20px;
@@ -50,14 +50,15 @@ st.markdown("""
         border-top: 1px dashed #374151; 
     }
     
-    /* NEWS CARD */
+    /* NEWS CARD - Đã tối ưu HTML để không bị lỗi thẻ */
     .news-card {
         background-color: #161b22;
         padding: 15px;
         border-radius: 10px;
         margin-bottom: 12px;
-        border-left: 5px solid #6B7280; /* Mặc định xám */
+        border-left: 5px solid #6B7280;
         transition: transform 0.2s;
+        display: block; /* Đảm bảo khối block */
     }
     .news-card:hover { transform: translateX(5px); }
     
@@ -70,32 +71,43 @@ st.markdown("""
         font-size: 0.75em;
         margin-right: 10px;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        display: inline-block;
     }
-    .time-badge { color: #6B7280; font-family: 'Consolas', monospace; font-size: 0.85em; margin-right: 8px; }
-    .news-text { color: #e6edf3; font-size: 15px; line-height: 1.5; font-family: 'Segoe UI', sans-serif; }
-    
-    /* ERROR BOX */
-    .error-box {
-        background-color: #7f1d1d;
-        color: #fca5a5;
-        padding: 15px;
-        border-radius: 8px;
-        margin-bottom: 20px;
-        border: 1px solid #991b1b;
-        font-family: monospace;
-        font-size: 0.9em;
+    .time-badge { 
+        color: #6B7280; 
+        font-family: 'Consolas', monospace; 
+        font-size: 0.85em; 
+        margin-right: 8px; 
+    }
+    .news-text { 
+        color: #e6edf3; 
+        font-size: 15px; 
+        line-height: 1.5; 
+        font-family: 'Segoe UI', sans-serif; 
+        display: block;
+        margin-top: 5px;
     }
     
     /* DEBUG TEXT */
     .debug-info {
         font-size: 0.75em;
-        color: #F59E0B; /* Màu cam */
+        color: #F59E0B;
         font-family: monospace;
         margin-top: 8px;
         padding-top: 5px;
         border-top: 1px dashed #374151;
+        display: block;
+    }
+    
+    /* ERROR BOX */
+    .error-box {
+        background-color: #7f1d1d;
+        color: #fca5a5;
+        padding: 10px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        border: 1px solid #991b1b;
+        font-size: 0.9em;
     }
     
     /* COUNTDOWN */
@@ -118,7 +130,7 @@ st.markdown("""
 
 @st.cache_resource
 def load_finbert():
-    """Load model FinBERT (Chỉ chạy 1 lần)"""
+    """Load model FinBERT (Chỉ chạy 1 lần khi khởi động)"""
     if not AI_AVAILABLE: return None
     try:
         return pipeline("text-classification", model="ProsusAI/finbert")
@@ -126,7 +138,7 @@ def load_finbert():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_translate(text, target='en'):
-    """Dịch thuật có Cache"""
+    """Dịch thuật có Cache 1 tiếng"""
     if target == 'vi': return text
     try:
         if not text or len(text) < 2: return text
@@ -137,7 +149,6 @@ def cached_translate(text, target='en'):
 SECRET_KEY = "zxadpfiadfjapppasdfdddddddddddddfffffffffffffffffdfa3123123123"
 API_URL = "https://vnwallstreet.com/api/inter/newsFlash/page"
 
-# Header giả lập
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://vnwallstreet.com/",
@@ -149,7 +160,7 @@ def get_news_batch():
     try:
         ts = int(time.time() * 1000)
         
-        # --- KHÔI PHỤC ĐẦY ĐỦ THAM SỐ ---
+        # --- QUAN TRỌNG: GIỮ NGUYÊN THAM SỐ ĐỂ KHÔNG LỖI 400 ---
         params = {
             "limit": 20,
             "uid": "-1",
@@ -159,34 +170,26 @@ def get_news_batch():
             "time_": ts
         }
         
-        # 1. Tạo chữ ký MD5
+        # 1. Tạo chữ ký
         sorted_keys = sorted(params.keys())
         query = '&'.join([f"{k}={params[k]}" for k in sorted_keys])
-        
-        # Mã hóa MD5 và viết hoa
         sign = hashlib.md5(query.encode('utf-8')).hexdigest().upper()
         
-        # 2. Chuẩn bị params gửi đi (Xóa key_, thêm sign_)
+        # 2. Gửi Request
         del params['key_']
         params['sign_'] = sign
         
-        # 3. Gửi Request
         resp = requests.get(API_URL, params=params, headers=HEADERS, timeout=10)
         
-        # --- KIỂM TRA LỖI ---
         if resp.status_code == 200:
             data = resp.json()
-            if 'data' in data:
-                return data['data']
-            else:
-                return []
+            return data.get('data', [])
         else:
-            # Nếu lỗi 400/403 -> In ra màn hình để debug
             st.markdown(f'<div class="error-box">⚠️ API ERROR {resp.status_code}: {resp.text}</div>', unsafe_allow_html=True)
             return []
             
     except Exception as e:
-        st.error(f"❌ Lỗi kết nối: {e}")
+        st.error(f"❌ Connection Error: {e}")
         return []
 
 # ==============================================================================
@@ -210,8 +213,8 @@ with st.expander("⚙️ CẤU HÌNH HỆ THỐNG (SETTINGS)", expanded=True):
 
     with col3:
         # Nút bật chế độ Debug
-        debug_mode = st.checkbox("🛠 Debug Mode", value=False, help="Hiển thị text tiếng Anh mà AI đang đọc")
-        if st.button("🔄 Cập nhật ngay"):
+        debug_mode = st.checkbox("🛠 Debug Mode", value=False)
+        if st.button("🔄 Cập nhật"):
             st.rerun()
 
 # ==============================================================================
@@ -223,10 +226,10 @@ raw_news = get_news_batch()
 
 if raw_news:
     processed_items = []
-    math_scores = [] 
+    math_scores = [] # Dùng để tính toán Dashboard
     
     # Hiển thị Progress Bar
-    with st.status("🚀 AI đang quét dữ liệu thị trường...", expanded=True) as status:
+    with st.status("🚀 AI đang phân tích dữ liệu...", expanded=True) as status:
         total = len(raw_news)
         prog_bar = st.progress(0)
         
@@ -246,7 +249,7 @@ if raw_news:
                 ai_input_text = cached_translate(original_text, 'en')
             
             # 2. FinBERT Analysis
-            ai_res = {"label": "NEUTRAL", "score": 0.0, "color": "#6B7280"} 
+            ai_res = {"label": "NEUTRAL", "score": 0.0, "color": "#6B7280"} # Mặc định
             
             if finbert and ai_input_text:
                 try:
@@ -256,12 +259,11 @@ if raw_news:
                     
                     if lbl == 'positive':
                         ai_res = {"label": "BULLISH", "score": conf_score, "color": "#10B981"}
-                        math_scores.append(conf_score) 
+                        math_scores.append(conf_score) # Cộng điểm
                     elif lbl == 'negative':
                         ai_res = {"label": "BEARISH", "score": conf_score, "color": "#EF4444"}
-                        math_scores.append(-conf_score) 
+                        math_scores.append(-conf_score) # Trừ điểm
                     else:
-                        # NEUTRAL: Vẫn lưu score để hiển thị
                         ai_res = {"label": "NEUTRAL", "score": conf_score, "color": "#6B7280"}
                         math_scores.append(0) 
                 except: pass
@@ -281,23 +283,24 @@ if raw_news:
                 "debug": ai_input_text
             })
             
-        status.update(label="✅ Phân tích hoàn tất!", state="complete", expanded=False)
+        status.update(label="✅ Đã xong!", state="complete", expanded=False)
 
-    # --- TÍNH TOÁN DASHBOARD ---
+    # --- LOGIC DỰ BÁO DÒNG TIỀN (USD IMPACT) ---
     avg_score = statistics.mean(math_scores) if math_scores else 0
     
+    # Logic: Risk On (Tin tốt) -> Bán USD, Mua Chứng. Risk Off (Tin xấu) -> Mua USD.
     if avg_score > 0.15:
         mood_text = "RISK ON (HƯNG PHẤN) 🟢"
         mood_color = "#10B981"
-        advice = "Thị trường Tích cực. Dòng tiền vào Chứng khoán/Crypto. USD/Vàng giảm áp lực."
+        advice = "Thị trường Tích cực ➔ Dòng tiền vào Chứng khoán/Crypto. <b>USD Index (DXY) giảm</b>."
     elif avg_score < -0.15:
         mood_text = "RISK OFF (SỢ HÃI) 🔴"
         mood_color = "#EF4444"
-        advice = "Thị trường Tiêu cực. Dòng tiền trú ẩn vào USD/Vàng. Cẩn trọng với Cổ phiếu."
+        advice = "Thị trường Tiêu cực ➔ Dòng tiền trú ẩn. <b>USD Index (DXY) & Vàng tăng</b>."
     else:
         mood_text = "NEUTRAL (ĐI NGANG) ⚪"
         mood_color = "#9CA3AF"
-        advice = "Thị trường chưa rõ xu hướng hoặc tin tức trái chiều."
+        advice = "Tin tức trung tính hoặc trái chiều. USD Index đi ngang."
 
     # --- HIỂN THỊ DASHBOARD ---
     st.markdown(f"""
@@ -309,25 +312,26 @@ if raw_news:
     </div>
     """, unsafe_allow_html=True)
     
-    # --- HIỂN THỊ TIN TỨC ---
+    # --- HIỂN THỊ TIN TỨC (ĐÃ FIX LỖI HTML DIV THỪA) ---
+    st.caption(f"News Feed • {sel_tz}")
+    
     for item in processed_items:
         ai = item['ai']
         
-        # Phần Debug (Chỉ hiện nếu user tích chọn)
-        debug_html = ""
+        # Chuẩn bị HTML Debug (nếu bật)
+        debug_block = ""
         if debug_mode:
-            debug_html = f'<div class="debug-info">🔍 [DEBUG] AI Input: "{item["debug"]}"</div>'
+            debug_block = f"<span class='debug-info'>🔍 INPUT: {item['debug']}</span>"
         
+        # Render HTML sạch sẽ, không lồng div phức tạp
         st.markdown(f"""
         <div class="news-card" style="border-left: 5px solid {ai['color']};">
-            <div>
-                <span class="time-badge">[{item['time']}]</span>
-                <span class="ai-badge" style="background-color: {ai['color']};">
-                    {ai['label']} {int(ai['score']*100)}%
-                </span>
-                <span class="news-text">{item['text']}</span>
-                {debug_html}
-            </div>
+            <span class="time-badge">[{item['time']}]</span>
+            <span class="ai-badge" style="background-color: {ai['color']};">
+                {ai['label']} {int(ai['score']*100)}%
+            </span>
+            <span class="news-text">{item['text']}</span>
+            {debug_block}
         </div>
         """, unsafe_allow_html=True)
 
