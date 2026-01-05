@@ -4,32 +4,40 @@ import time
 import requests
 import datetime
 import statistics
-import random
-from deep_translator import GoogleTranslator
+import json
+import re
 
-# Kiểm tra thư viện AI
+# ==============================================================================
+# 1. CẤU HÌNH AI (INTERNAL CONFIGURATION)
+# ==============================================================================
+# Đã điền sẵn thông tin nội bộ của bạn
+LLM_API_KEY = "csk-dwtjyxt4yrvdxf2d28fk3x8whdkdtf526njm925enm3pt32w"
+LLM_BASE_URL = "https://api.cerberus.xyz/v1" 
+LLM_MODEL = "gpt-oss-120b" 
+
+# Khởi tạo Client
 try:
-    from transformers import pipeline
+    from openai import OpenAI
+    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
     AI_AVAILABLE = True
 except ImportError:
     AI_AVAILABLE = False
 
 # ==============================================================================
-# 1. CẤU HÌNH & CSS (PREMIUM DARK UI)
+# 2. GIAO DIỆN & CSS (DARK PRO UI)
 # ==============================================================================
 st.set_page_config(
-    page_title="VnWallStreet AI Terminal",
-    page_icon="⚡",
+    page_title=f"VnWallStreet x {LLM_MODEL}", 
+    page_icon="🧠", 
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
 st.markdown("""
     <style>
-    /* Nền đen Deep Dark */
     .stApp { background-color: #0b0f19; }
     
-    /* DASHBOARD TỔNG HỢP */
+    /* DASHBOARD */
     .dashboard-box {
         background: linear-gradient(145deg, #1f2937, #111827);
         padding: 20px;
@@ -39,320 +47,242 @@ st.markdown("""
         margin-bottom: 25px;
         box-shadow: 0 4px 15px rgba(0,0,0,0.5);
     }
-    .sentiment-label { font-size: 2em; font-weight: 900; margin: 5px 0; letter-spacing: 1px; }
-    .sentiment-score { font-size: 1.2em; font-family: monospace; color: #E5E7EB; }
-    .flow-advice { 
-        color: #9CA3AF; 
-        font-style: italic; 
-        font-size: 0.9em; 
-        margin-top: 15px; 
-        padding-top: 10px; 
-        border-top: 1px dashed #374151; 
-    }
+    .score-text { font-size: 2.2em; font-weight: 900; margin: 10px 0; letter-spacing: 1px;}
     
-    /* NEWS CARD - Đã tối ưu HTML để không bị lỗi thẻ */
+    /* NEWS CARD */
     .news-card {
         background-color: #161b22;
         padding: 15px;
         border-radius: 10px;
-        margin-bottom: 12px;
+        margin-bottom: 15px;
         border-left: 5px solid #6B7280;
         transition: transform 0.2s;
-        display: block; /* Đảm bảo khối block */
     }
-    .news-card:hover { transform: translateX(5px); }
+    .news-card:hover { transform: translateX(3px); }
     
     /* BADGES */
-    .ai-badge {
-        font-weight: 800;
-        padding: 4px 8px;
-        border-radius: 4px;
-        color: white;
-        font-size: 0.75em;
-        margin-right: 10px;
-        text-transform: uppercase;
+    .ai-badge { 
+        font-weight: 800; 
+        padding: 3px 8px; 
+        border-radius: 4px; 
+        color: white; 
+        font-size: 0.75em; 
+        margin-right: 8px; 
+        text-transform: uppercase; 
         display: inline-block;
     }
-    .time-badge { 
-        color: #6B7280; 
-        font-family: 'Consolas', monospace; 
-        font-size: 0.85em; 
-        margin-right: 8px; 
-    }
-    .news-text { 
-        color: #e6edf3; 
-        font-size: 15px; 
-        line-height: 1.5; 
-        font-family: 'Segoe UI', sans-serif; 
-        display: block;
-        margin-top: 5px;
+    
+    .ai-reason { 
+        display: block; 
+        margin-top: 10px; 
+        padding-top: 8px; 
+        border-top: 1px dashed #374151; 
+        color: #F59E0B; /* Màu cam vàng */
+        font-size: 0.9em; 
+        font-style: italic; 
+        font-family: 'Segoe UI', sans-serif;
     }
     
-    /* DEBUG TEXT */
-    .debug-info {
-        font-size: 0.75em;
-        color: #F59E0B;
-        font-family: monospace;
-        margin-top: 8px;
-        padding-top: 5px;
-        border-top: 1px dashed #374151;
-        display: block;
-    }
-    
-    /* ERROR BOX */
-    .error-box {
-        background-color: #7f1d1d;
-        color: #fca5a5;
-        padding: 10px;
-        border-radius: 8px;
-        margin-bottom: 20px;
-        border: 1px solid #991b1b;
-        font-size: 0.9em;
-    }
+    .time-badge { color: #6B7280; font-family: monospace; font-size: 0.85em; margin-right: 8px; }
+    .news-text { color: #e6edf3; font-size: 15px; line-height: 1.5; font-weight: 500; display: inline;}
     
     /* COUNTDOWN */
-    .countdown-bar {
-        text-align: center;
-        color: #6B7280;
-        font-size: 0.85em;
-        margin-top: 30px;
-        padding: 10px;
-        background-color: #0d1117;
-        border-radius: 8px;
-        border: 1px solid #30363d;
-    }
+    .countdown-bar { text-align: center; color: #6B7280; margin-top: 30px; padding: 10px; background: #0d1117; border-radius: 8px; border: 1px solid #30363d;}
     </style>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. HỆ THỐNG AI & DATA
+# 3. CORE: HÀM GỌI AI BATCH (GOM TIN)
 # ==============================================================================
+def analyze_news_batch(news_list):
+    """
+    Gửi 1 Prompt chứa 20 tin cho Model 120B xử lý 1 lần.
+    """
+    if not AI_AVAILABLE or not news_list:
+        return []
 
-@st.cache_resource
-def load_finbert():
-    """Load model FinBERT (Chỉ chạy 1 lần khi khởi động)"""
-    if not AI_AVAILABLE: return None
+    # 1. Tạo nội dung Prompt
+    news_content_str = ""
+    for idx, item in enumerate(news_list):
+        text = (item.get('title') or item.get('content') or "").strip()
+        news_content_str += f"[ID {idx}]: {text}\n"
+
+    # 2. System Prompt (Chỉ đạo AI trả về JSON)
+    system_prompt = """
+    You are an expert Financial Analyst AI (Hedge Fund Algo).
+    Analyze the provided list of financial news items.
+    
+    OUTPUT REQUIREMENTS:
+    1. Return ONLY a valid JSON Array. No markdown, no explanation.
+    2. Each object must follow this schema:
+       {
+         "id": <integer, matching the input ID>,
+         "sentiment": "BULLISH" | "BEARISH" | "NEUTRAL",
+         "score": <float, 0.0 to 1.0 confidence>,
+         "reason_vi": "<Explain in Vietnamese: Impact on USD/Markets. Max 15 words.>"
+       }
+    """
+
     try:
-        return pipeline("text-classification", model="ProsusAI/finbert")
-    except Exception: return None
+        # Gọi API Cerberus
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": news_content_str}
+            ],
+            temperature=0.1, # Nhiệt độ thấp để JSON chuẩn
+            max_tokens=3000
+        )
+        
+        raw_content = response.choices[0].message.content
+        
+        # 3. Làm sạch chuỗi JSON (Parser)
+        json_str = raw_content.strip()
+        # Loại bỏ markdown nếu có
+        if "```json" in json_str:
+            json_str = json_str.split("```json")[1].split("```")[0]
+        elif "```" in json_str:
+            json_str = json_str.split("```")[1]
+            
+        return json.loads(json_str)
+        
+    except Exception as e:
+        # st.error(f"AI Error: {e}") # Uncomment để debug nếu cần
+        return []
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_translate(text, target='en'):
-    """Dịch thuật có Cache 1 tiếng"""
-    if target == 'vi': return text
-    try:
-        if not text or len(text) < 2: return text
-        return GoogleTranslator(source='auto', target=target).translate(text)
-    except: return text
-
-# Cấu hình API VnWallStreet
+# ==============================================================================
+# 4. DATA FETCHING (FIXED SIGNATURE - NO ERROR 400)
+# ==============================================================================
 SECRET_KEY = "zxadpfiadfjapppasdfdddddddddddddfffffffffffffffffdfa3123123123"
 API_URL = "https://vnwallstreet.com/api/inter/newsFlash/page"
-
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://vnwallstreet.com/",
-    "Origin": "https://vnwallstreet.com",
-    "Accept": "application/json, text/plain, */*"
+    "Accept": "application/json"
 }
 
-def get_news_batch():
+def get_news_data():
     try:
         ts = int(time.time() * 1000)
+        # Giữ nguyên đầy đủ tham số để tính Sign đúng
+        params = {"limit": 20, "uid": "-1", "start": "0", "token_": "", "key_": SECRET_KEY, "time_": ts}
         
-        # --- QUAN TRỌNG: GIỮ NGUYÊN THAM SỐ ĐỂ KHÔNG LỖI 400 ---
-        params = {
-            "limit": 20,
-            "uid": "-1",
-            "start": "0",       
-            "token_": "",       
-            "key_": SECRET_KEY,
-            "time_": ts
-        }
-        
-        # 1. Tạo chữ ký
+        # Tạo chữ ký
         sorted_keys = sorted(params.keys())
         query = '&'.join([f"{k}={params[k]}" for k in sorted_keys])
         sign = hashlib.md5(query.encode('utf-8')).hexdigest().upper()
         
-        # 2. Gửi Request
+        # Gửi đi
         del params['key_']
         params['sign_'] = sign
         
         resp = requests.get(API_URL, params=params, headers=HEADERS, timeout=10)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get('data', [])
-        else:
-            st.markdown(f'<div class="error-box">⚠️ API ERROR {resp.status_code}: {resp.text}</div>', unsafe_allow_html=True)
-            return []
-            
-    except Exception as e:
-        st.error(f"❌ Connection Error: {e}")
-        return []
+        return resp.json().get('data', []) if resp.status_code == 200 else []
+    except: return []
 
 # ==============================================================================
-# 3. THANH ĐIỀU KHIỂN (CONTROL PANEL)
+# 5. MAIN LOGIC
 # ==============================================================================
-st.title("⚡ VNWallStreet AI Terminal")
+st.title(f"⚡ VNWallStreet x {LLM_MODEL}")
 
-with st.expander("⚙️ CẤU HÌNH HỆ THỐNG (SETTINGS)", expanded=True):
-    col1, col2, col3 = st.columns([1.5, 1.5, 1])
-    
-    with col1:
-        LANGUAGES = {"🇬🇧 English": "en", "🇻🇳 Tiếng Việt": "vi"}
-        sel_lang = st.selectbox("Ngôn ngữ hiển thị:", list(LANGUAGES.keys()))
-        target_lang = LANGUAGES[sel_lang]
-        
-    with col2:
-        TIMEZONES = {"Vietnam (UTC+7)": 7, "New York (UTC-5)": -5, "London (UTC+0)": 0}
-        sel_tz = st.selectbox("Múi giờ:", list(TIMEZONES.keys()))
-        tz_offset = TIMEZONES[sel_tz]
-        CURRENT_TZ = datetime.timezone(datetime.timedelta(hours=tz_offset))
+# Config Timezone
+CURRENT_TZ = datetime.timezone(datetime.timedelta(hours=7))
 
-    with col3:
-        # Nút bật chế độ Debug
-        debug_mode = st.checkbox("🛠 Debug Mode", value=False)
-        if st.button("🔄 Cập nhật"):
-            st.rerun()
-
-# ==============================================================================
-# 4. QUY TRÌNH XỬ LÝ (PIPELINE)
-# ==============================================================================
-
-finbert = load_finbert()
-raw_news = get_news_batch()
+# 1. Load Data
+raw_news = get_news_data()
 
 if raw_news:
-    processed_items = []
-    math_scores = [] # Dùng để tính toán Dashboard
     
-    # Hiển thị Progress Bar
-    with st.status("🚀 AI đang phân tích dữ liệu...", expanded=True) as status:
-        total = len(raw_news)
-        prog_bar = st.progress(0)
+    # 2. Xử lý AI (Batch Request)
+    ai_results_map = {}
+    
+    # Hiển thị Spinner
+    with st.spinner(f"🚀 AI ({LLM_MODEL}) đang phân tích {len(raw_news)} tin tức..."):
+        batch_results = analyze_news_batch(raw_news)
         
-        for idx, item in enumerate(raw_news):
-            prog_bar.progress((idx + 1) / total)
-            
-            # 1. Xử lý Text
-            original_text = (item.get('title') or item.get('content') or "").strip()
-            
-            # Text hiển thị (Theo ngôn ngữ user chọn)
-            display_text = cached_translate(original_text, target_lang)
-            
-            # Text cho AI (BẮT BUỘC TIẾNG ANH)
-            if target_lang == 'en':
-                ai_input_text = display_text
-            else:
-                ai_input_text = cached_translate(original_text, 'en')
-            
-            # 2. FinBERT Analysis
-            ai_res = {"label": "NEUTRAL", "score": 0.0, "color": "#6B7280"} # Mặc định
-            
-            if finbert and ai_input_text:
-                try:
-                    res = finbert(ai_input_text)[0]
-                    lbl = res['label'] 
-                    conf_score = res['score'] 
-                    
-                    if lbl == 'positive':
-                        ai_res = {"label": "BULLISH", "score": conf_score, "color": "#10B981"}
-                        math_scores.append(conf_score) # Cộng điểm
-                    elif lbl == 'negative':
-                        ai_res = {"label": "BEARISH", "score": conf_score, "color": "#EF4444"}
-                        math_scores.append(-conf_score) # Trừ điểm
-                    else:
-                        ai_res = {"label": "NEUTRAL", "score": conf_score, "color": "#6B7280"}
-                        math_scores.append(0) 
-                except: pass
-            
-            # 3. Thời gian
-            try:
-                raw_t = int(item.get('createtime') or item.get('showtime') or 0)
-                if raw_t > 1000000000000: raw_t /= 1000
-                time_str = datetime.datetime.fromtimestamp(raw_t, CURRENT_TZ).strftime("%H:%M")
-            except: time_str = "--:--"
-            
-            # Lưu kết quả
-            processed_items.append({
-                "time": time_str,
-                "text": display_text,
-                "ai": ai_res,
-                "debug": ai_input_text
-            })
-            
-        status.update(label="✅ Đã xong!", state="complete", expanded=False)
+        # Chuyển List thành Map để tra cứu theo ID
+        if batch_results:
+            for item in batch_results:
+                if isinstance(item, dict) and 'id' in item:
+                    ai_results_map[item['id']] = item
 
-    # --- LOGIC DỰ BÁO DÒNG TIỀN (USD IMPACT) ---
-    avg_score = statistics.mean(math_scores) if math_scores else 0
+    # 3. Tính toán Dashboard & Hiển thị
+    scores = []
+    display_items = []
     
-    # Logic: Risk On (Tin tốt) -> Bán USD, Mua Chứng. Risk Off (Tin xấu) -> Mua USD.
-    if avg_score > 0.15:
-        mood_text = "RISK ON (HƯNG PHẤN) 🟢"
-        mood_color = "#10B981"
-        advice = "Thị trường Tích cực ➔ Dòng tiền vào Chứng khoán/Crypto. <b>USD Index (DXY) giảm</b>."
-    elif avg_score < -0.15:
-        mood_text = "RISK OFF (SỢ HÃI) 🔴"
-        mood_color = "#EF4444"
-        advice = "Thị trường Tiêu cực ➔ Dòng tiền trú ẩn. <b>USD Index (DXY) & Vàng tăng</b>."
-    else:
-        mood_text = "NEUTRAL (ĐI NGANG) ⚪"
-        mood_color = "#9CA3AF"
-        advice = "Tin tức trung tính hoặc trái chiều. USD Index đi ngang."
+    for idx, item in enumerate(raw_news):
+        # Default data
+        ai_info = {"sentiment": "NEUTRAL", "score": 0, "reason": "Chưa có nhận định", "color": "#6B7280"}
+        
+        # Map kết quả từ AI
+        if idx in ai_results_map:
+            res = ai_results_map[idx]
+            sent = res.get("sentiment", "NEUTRAL").upper()
+            scr = float(res.get("score", 0))
+            reason = res.get("reason_vi", "")
+            
+            if "BULL" in sent:
+                ai_info = {"sentiment": "BULLISH", "score": scr, "reason": reason, "color": "#10B981"}
+                scores.append(scr)
+            elif "BEAR" in sent:
+                ai_info = {"sentiment": "BEARISH", "score": scr, "reason": reason, "color": "#EF4444"}
+                scores.append(-scr)
+            else:
+                ai_info = {"sentiment": "NEUTRAL", "score": scr, "reason": reason, "color": "#6B7280"}
+                scores.append(0)
+        
+        # Format Time
+        try:
+            ts = int(item.get('createtime') or 0)
+            if ts > 1000000000000: ts /= 1000
+            t_str = datetime.datetime.fromtimestamp(ts, CURRENT_TZ).strftime("%H:%M")
+        except: t_str = "--:--"
+        
+        display_items.append({
+            "time": t_str,
+            "text": (item.get('title') or item.get('content') or "").strip(),
+            "ai": ai_info
+        })
 
-    # --- HIỂN THỊ DASHBOARD ---
+    # --- DASHBOARD RENDER ---
+    avg = statistics.mean(scores) if scores else 0
+    if avg > 0.15: 
+        mood = "RISK ON 🟢"; color = "#10B981"
+        msg = "Thị trường Tích cực ➔ Dòng tiền vào Stocks/Crypto. USD giảm."
+    elif avg < -0.15: 
+        mood = "RISK OFF 🔴"; color = "#EF4444"
+        msg = "Thị trường Tiêu cực ➔ Dòng tiền trú ẩn vào USD/Vàng."
+    else: 
+        mood = "SIDEWAY ⚪"; color = "#9CA3AF"
+        msg = "Thị trường đi ngang. Tin tức trái chiều."
+    
     st.markdown(f"""
     <div class="dashboard-box">
-        <div style="font-size:0.9em; color:#9CA3AF; letter-spacing:1px;">MARKET SENTIMENT</div>
-        <div class="sentiment-label" style="color: {mood_color}">{mood_text}</div>
-        <div class="sentiment-score">Avg Score: {avg_score:.2f}</div>
-        <div class="flow-advice">{advice}</div>
+        <div class="score-text" style="color:{color}">{mood}</div>
+        <div style="color:#ddd; font-family:monospace;">AI Confidence Score: {avg:.2f}</div>
+        <div style="color:#999; font-size:0.9em; margin-top:10px; font-style:italic;">{msg}</div>
     </div>
     """, unsafe_allow_html=True)
     
-    # --- HIỂN THỊ TIN TỨC (ĐÃ FIX LỖI HTML DIV THỪA) ---
-    st.caption(f"News Feed • {sel_tz}")
-    
-    for item in processed_items:
+    # --- NEWS LIST RENDER ---
+    for item in display_items:
         ai = item['ai']
-        
-        # Chuẩn bị HTML Debug (nếu bật)
-        debug_block = ""
-        if debug_mode:
-            debug_block = f"<span class='debug-info'>🔍 INPUT: {item['debug']}</span>"
-        
-        # Render HTML sạch sẽ, không lồng div phức tạp
         st.markdown(f"""
         <div class="news-card" style="border-left: 5px solid {ai['color']};">
             <span class="time-badge">[{item['time']}]</span>
-            <span class="ai-badge" style="background-color: {ai['color']};">
-                {ai['label']} {int(ai['score']*100)}%
-            </span>
+            <span class="ai-badge" style="background-color: {ai['color']};">{ai['sentiment']} {int(ai['score']*100)}%</span>
             <span class="news-text">{item['text']}</span>
-            {debug_block}
+            <span class="ai-reason">💡 {ai['reason']}</span>
         </div>
         """, unsafe_allow_html=True)
 
 else:
-    if not raw_news:
-         st.warning("⚠️ Không có dữ liệu hoặc Server đang lọc tin.")
+    st.warning("⚠️ Không lấy được dữ liệu. Kiểm tra lại kết nối.")
 
-# ==============================================================================
-# 5. ĐẾM NGƯỢC (AUTO REFRESH)
-# ==============================================================================
-REFRESH_SECONDS = 90
-footer = st.empty()
-
-for i in range(REFRESH_SECONDS, 0, -1):
-    with footer.container():
-        st.markdown(f"""
-            <div class="countdown-bar">
-                ⏳ Auto-refresh in <b style="color: #FFD700;">{i}</b>s 
-                <span style="margin-left:10px; opacity:0.7">| Next: {(datetime.datetime.now() + datetime.timedelta(seconds=i)).strftime('%H:%M:%S')}</span>
-            </div>
-        """, unsafe_allow_html=True)
+# Auto Refresh (120s để AI xử lý kỹ)
+cnt = st.empty()
+for i in range(120, 0, -1):
+    cnt.markdown(f"<div class='countdown-bar'>⏳ Cập nhật sau {i}s</div>", unsafe_allow_html=True)
     time.sleep(1)
-
 st.rerun()
