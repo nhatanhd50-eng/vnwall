@@ -4,3 +4,4 @@ deep-translator
 transformers
 torch
 statistics
+cerebras_cloud_sdk
