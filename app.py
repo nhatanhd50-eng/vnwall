@@ -9,78 +9,42 @@ import re
 from deep_translator import GoogleTranslator
 
 # ==============================================================================
-# 1. CẤU HÌNH AI & FALLBACK MODELS
+# 1. CẤU HÌNH AI & FALLBACK
 # ==============================================================================
 LLM_API_KEY = "csk-dwtjyxt4yrvdxf2d28fk3x8whdkdtf526njm925enm3pt32w"
 LLM_BASE_URL = "https://api.cerberus.xyz/v1" 
 
-# DANH SÁCH MODEL (Ưu tiên từ trên xuống dưới)
-# 1. Model chính (Thông minh nhất)
-# 2. Model dự phòng 1 (Khủng long Qwen)
-# 3. Model dự phòng 2 (Nhẹ, nhanh)
+# Danh sách Model (Ưu tiên Llama/Qwen lớn để hiểu ngữ cảnh tốt)
 MODEL_LIST = [
     "gpt-oss-120b", 
-    "qwen-3-235b-a22b-instruct-2507", 
-    "qwen-3-32b"
+    "llama-3.1-70b-instruct",
+    "qwen-3-235b-a22b-instruct-2507"
 ]
 
 try:
     from cerebras.cloud.sdk import Cerebras
-    # Client khởi tạo 1 lần
-    client = Cerebras(api_key=LLM_API_KEY) 
+    client = Cerebras(api_key=LLM_API_KEY)
     AI_AVAILABLE = True
-except ImportError:
-    st.error("⚠️ Chưa cài SDK! Chạy: pip install cerebras_cloud_sdk")
-    AI_AVAILABLE = False
 except:
     AI_AVAILABLE = False
 
 # ==============================================================================
-# 2. GIAO DIỆN & CSS (GOLD TRADING PRO)
+# 2. GIAO DIỆN & CSS
 # ==============================================================================
-st.set_page_config(page_title="Gold Inter-market AI", page_icon="🏆", layout="centered")
+st.set_page_config(page_title="Gold Signal Pro", page_icon="🏆", layout="centered")
 
 st.markdown("""
     <style>
     .stApp { background-color: #0b0f19; }
-    
-    /* CONTROL PANEL */
-    .control-panel {
-        background-color: #161b22;
-        padding: 15px;
-        border-radius: 10px;
-        margin-bottom: 20px;
-        border: 1px solid #30363d;
-    }
-    
-    /* DASHBOARD */
-    .dashboard-box {
-        background: linear-gradient(145deg, #2A2100, #1a1a1a);
-        padding: 20px;
-        border-radius: 12px;
-        border: 1px solid #FFD700;
-        text-align: center;
-        margin-bottom: 25px;
-        box-shadow: 0 4px 15px rgba(255, 215, 0, 0.2);
-    }
-    
-    /* CARD */
-    .news-card {
-        background-color: #161b22;
-        padding: 15px;
-        border-radius: 10px;
-        margin-bottom: 15px;
-        border-left: 5px solid #6B7280;
-        transition: all 0.5s ease;
-    }
-    
+    .control-panel { background-color: #161b22; padding: 15px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #30363d; }
+    .dashboard-box { background: linear-gradient(145deg, #2A2100, #1a1a1a); padding: 20px; border-radius: 12px; border: 1px solid #FFD700; text-align: center; margin-bottom: 25px; box-shadow: 0 4px 15px rgba(255, 215, 0, 0.2); }
+    .news-card { background-color: #161b22; padding: 15px; border-radius: 10px; margin-bottom: 15px; border-left: 5px solid #6B7280; transition: all 0.5s ease; }
     .ai-badge { font-weight: 800; padding: 4px 8px; border-radius: 4px; color: white; font-size: 0.75em; margin-right: 8px; text-transform: uppercase; }
     .ai-loading { color: #F59E0B; font-style: italic; font-size: 0.85em; display: block; margin-top: 5px; }
     .ai-reason { display: block; margin-top: 10px; padding-top: 8px; border-top: 1px dashed #374151; color: #F59E0B; font-size: 0.9em; font-style: italic; }
     .time-badge { color: #6B7280; font-family: monospace; font-size: 0.85em; margin-right: 8px; }
     .news-text { color: #e6edf3; font-size: 15px; line-height: 1.5; font-weight: 500; }
     .countdown-bar { text-align: center; color: #6B7280; margin-top: 30px; padding: 10px; background: #0d1117; border-radius: 8px; }
-    .model-tag { font-size: 0.7em; color: #555; margin-top: 5px; display: block; text-align: right;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -112,72 +76,77 @@ def get_news_data():
     except: return []
 
 # ==============================================================================
-# 4. CORE AI: FALLBACK MECHANISM & INTER-MARKET LOGIC
+# 4. CORE AI: CONTEXT-AWARE ANALYSIS (PHÂN TÍCH BỐI CẢNH)
 # ==============================================================================
-def analyze_news_batch_with_fallback(news_list, lang_instruction):
+def analyze_news_with_context(news_list, lang_instruction):
     if not AI_AVAILABLE or not news_list: return [], None
     
-    # 1. Chuẩn bị Input (English is best for Logic)
+    # 1. Input: Gom tất cả tin lại để AI thấy "Bức tranh toàn cảnh"
     content_str = ""
     for idx, item in enumerate(news_list):
         raw = (item.get('title') or item.get('content') or "").strip()
         eng = cached_translate(raw, 'en')
         content_str += f"ID {idx}: {eng}\n"
 
-    # 2. PROMPT: TƯ DUY LIÊN THỊ TRƯỜNG (DXY -> YIELDS -> GOLD)
+    # 2. PROMPT: NHẤN MẠNH BỐI CẢNH & RỦI RO CHÍNH TRỊ
+    # Đây là phần quan trọng nhất để AI nhận diện được tin Venezuela/Nga
     system_prompt = f"""
-    You are an Elite Global Macro Strategist.
+    You are an Elite Gold Trading Algorithm (XAU/USD).
     
-    TASK: Predict GOLD (XAU/USD) direction based on Inter-market Analysis.
+    STEP 1: SCAN THE CONTEXT
+    Read ALL news items together. Look for themes like:
+    - War / Military Conflict (Russia, Ukraine, Middle East) -> BUY GOLD
+    - Coup d'état / Political Unrest / Gunfire / Tanks (e.g., Venezuela) -> BUY GOLD
+    - US Dollar Weakness / Rate Cuts -> BUY GOLD
+    - US Dollar Strength / Strong Economy -> SELL GOLD
     
-    CHAIN OF THOUGHT (Do not output, just think):
-    1. News Impact on USD (DXY) and US Yields?
-    2. If DXY/Yields UP -> Gold DOWN (SELL).
-    3. If DXY/Yields DOWN -> Gold UP (BUY).
-    4. If War/Crisis -> Safe Haven Flow -> Gold UP (BUY).
+    STEP 2: SCORE EACH ITEM
+    Based on the context, assign a signal to each ID.
+    If a news item is part of a larger conflict (e.g., Gunfire in Caracas), mark it BUY GOLD (Risk Off).
     
-    OUTPUT: Valid JSON Array ONLY.
+    OUTPUT: Valid JSON Array ONLY. 
+    Ensure EVERY ID from 0 to {len(news_list)-1} is present.
+    
     Schema: 
     [
       {{
         "id": int, 
         "signal": "BUY"|"SELL"|"SIDEWAY", 
-        "score": float (0.1-0.99 confidence), 
-        "reason": "Explain DXY/Yields correlation in {lang_instruction} (max 15 words)"
+        "score": float (0.1-0.99), 
+        "reason": "Explain in {lang_instruction} why (max 15 words)"
       }}
     ]
     """
     
-    # 3. CƠ CHẾ FALLBACK (Thử lần lượt các model)
-    used_model = None
+    # Fallback Loop
+    active_model = None
     final_result = []
 
     for model_name in MODEL_LIST:
         try:
-            # st.toast(f"Trying model: {model_name}...") # Uncomment để debug
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": content_str}],
                 temperature=0.1, max_tokens=4000
             )
-            
             raw = response.choices[0].message.content
             # Clean JSON
             json_str = raw.split("```json")[1].split("```")[0] if "```json" in raw else raw
-            final_result = json.loads(json_str)
-            used_model = model_name
-            break # Thành công thì thoát vòng lặp ngay
+            # Remove any trailing text
+            if "]" in json_str: json_str = json_str[:json_str.rfind("]")+1]
             
+            final_result = json.loads(json_str)
+            active_model = model_name
+            break 
         except Exception as e:
-            print(f"Model {model_name} failed: {e}")
-            continue # Thất bại thì thử model tiếp theo trong danh sách
+            continue
 
-    return final_result, used_model
+    return final_result, active_model
 
 # ==============================================================================
 # 5. MAIN LOGIC
 # ==============================================================================
-st.title(f"🏆 Gold Inter-market AI")
+st.title(f"🏆 Gold Signal Pro")
 
 # --- CONTROL PANEL ---
 with st.container():
@@ -205,13 +174,12 @@ with st.container():
 raw_news = get_news_data()
 
 if raw_news:
-    # --- PHASE 1: HIỂN THỊ TRƯỚC (GRAY) ---
+    # --- PHASE 1: HIỂN THỊ XÁM ---
     news_placeholder = st.empty()
     
     with news_placeholder.container():
-        st.info(f"⏳ Scanning Market Data ({len(raw_news)} items)...")
+        st.info(f"⏳ Scanning Market Context...")
         for item in raw_news:
-            # Time & Text Processing
             try:
                 ts = int(item.get('createtime') or 0)
                 if ts > 1000000000000: ts /= 1000
@@ -224,28 +192,28 @@ if raw_news:
             st.markdown(f"""
             <div class="news-card" style="border-left: 5px solid #4B5563;">
                 <span class="time-badge">[{t_str}]</span>
-                <span class="ai-loading">⚡ Calculating Inter-market Impact...</span>
+                <span class="ai-loading">⚡ Evaluating Geopolitical Risks...</span>
                 <div class="news-text">{display_text}</div>
             </div>
             """, unsafe_allow_html=True)
 
-    # --- PHASE 2: AI FALLBACK EXECUTION ---
-    # Hệ thống tự động thử model 1 -> lỗi -> model 2 -> lỗi -> model 3
-    batch_results, active_model = analyze_news_batch_with_fallback(raw_news, ai_lang_instruct)
+    # --- PHASE 2: AI ANALYZE ---
+    batch_results, used_model = analyze_news_with_context(raw_news, ai_lang_instruct)
 
-    # --- PHASE 3: CẬP NHẬT GIAO DIỆN (COLOR) ---
+    # --- PHASE 3: HIỂN THỊ MÀU ---
     with news_placeholder.container():
         scores = []
         display_items = []
         
-        # Mapping Data
         for idx, item in enumerate(raw_news):
             ai_info = {"signal": "SIDEWAY", "score": 0, "reason": "No Signal", "color": "#6B7280"}
             
             matched = None
             if batch_results:
+                # Tìm ID chính xác
                 for res in batch_results:
                     if res.get('id') == idx: matched = res; break
+                # Fallback vị trí nếu AI quên ID
                 if not matched and idx < len(batch_results): matched = batch_results[idx]
             
             if matched:
@@ -263,7 +231,7 @@ if raw_news:
                     ai_info = {"signal": "SIDEWAY", "score": scr, "reason": reason, "color": "#FFD700"}
                     scores.append(0)
 
-            # Re-process Time & Text
+            # Re-process for final render
             try:
                 ts = int(item.get('createtime') or 0)
                 if ts > 1000000000000: ts /= 1000
@@ -277,21 +245,11 @@ if raw_news:
 
         # Dashboard Logic
         avg = statistics.mean(scores) if scores else 0
-        if avg > 0.15: 
-            trend="LONG / BUY GOLD 📈"
-            color="#10B981"
-            msg="DXY/Yields Suy yếu hoặc Rủi ro tăng cao"
-        elif avg < -0.15: 
-            trend="SHORT / SELL GOLD 📉"
-            color="#EF4444"
-            msg="Kinh tế Mỹ tốt, DXY/Yields Tăng mạnh"
-        else: 
-            trend="SIDEWAY / WAIT ⚠️"
-            color="#FFD700"
-            msg="Thị trường chờ tin tức mới"
+        if avg > 0.15: trend="LONG / BUY GOLD 📈"; color="#10B981"; msg="Bất ổn Chính trị / USD Suy yếu"
+        elif avg < -0.15: trend="SHORT / SELL GOLD 📉"; color="#EF4444"; msg="Kinh tế ổn định / USD Mạnh lên"
+        else: trend="SIDEWAY / WAIT ⚠️"; color="#FFD700"; msg="Chưa có tin tức dẫn dắt xu hướng"
 
-        # Hiển thị Model đang chạy
-        model_status = f"✅ Active Model: {active_model}" if active_model else "❌ All Models Failed"
+        model_status = f"✅ Model: {used_model}" if used_model else "❌ AI Busy"
 
         st.markdown(f"""
         <div class="dashboard-box">
@@ -302,7 +260,6 @@ if raw_news:
         </div>
         """, unsafe_allow_html=True)
 
-        # Render List
         for item in display_items:
             ai = item['ai']
             st.markdown(f"""
