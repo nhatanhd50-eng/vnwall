@@ -10,7 +10,7 @@ import requests
 import streamlit as st
 from deep_translator import GoogleTranslator
 
-# Optional libs
+# optional libs
 try:
     import yfinance as yf
     YF_AVAILABLE = True
@@ -24,30 +24,23 @@ except Exception:
     AUTOREFRESH_AVAILABLE = False
 
 # ==============================================================================
-# 0) CONFIG
+# 0) CONSTANTS / DEFAULTS
 # ==============================================================================
-APP_TITLE = "🏆 XAU/USD Intelligence (Incremental + Snapshot + No-Block Countdown)"
+APP_TITLE = "🏆 XAU/USD Intelligence (Incremental + Snapshot + UI Tick)"
 DB_PATH = "xau_cache.sqlite3"
-PROMPT_VERSION = "xau_snapshot_v2"
+PROMPT_VERSION = "xau_snapshot_ui_v3"
 FETCH_LIMIT = 20
 
-# Refresh strategy:
-AUTO_REFRESH_SECONDS = 180          # full refresh interval (fetch news + snapshot + AI if needed)
-UI_TICK_SECONDS = 5                 # UI countdown update interval (NO fetch)
+DEFAULT_FULL_REFRESH = 180      # seconds
+DEFAULT_SNAPSHOT_TTL = 900      # seconds (15 min)
+DEFAULT_YF_DELAY = 1.2          # seconds per ticker
+DEFAULT_UI_TICK = 5             # seconds (UI rerun interval)
 
 MODEL_LIST = [
     "gpt-oss-120b",
     "qwen-3-235b-a22b-instruct-2507",
     "qwen-3-32b",
 ]
-
-FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-FRED_SERIES = {
-    "usd_proxy_dtwexbgs": "DTWEXBGS",   # USD proxy index
-    "us10y_dgs10": "DGS10",             # 10Y nominal yield (daily)
-    "us10y_real_dfii10": "DFII10",      # 10Y real yield (daily)
-    "vix_vixcls": "VIXCLS",             # VIX close (daily)
-}
 
 YF_TICKERS = {
     "DXY": "DX-Y.NYB",
@@ -93,19 +86,20 @@ st.markdown(
     """
 <style>
 .stApp { background-color: #0b0f19; }
+
 .control-panel{
   background:#161b22; border:1px solid #30363d; padding:15px; border-radius:10px; margin-bottom:18px;
 }
 .dashboard-box{
   background: linear-gradient(145deg, #2A2100, #1a1a1a);
   border:1px solid #FFD700; border-radius:12px;
-  padding:18px; margin-bottom:18px;
+  padding:16px; margin-bottom:14px;
   box-shadow:0 4px 15px rgba(255,215,0,0.18);
   text-align:center;
 }
 .snapshot-box{
   background:#10151c; border:1px solid #30363d; border-radius:12px;
-  padding:14px; margin-bottom:16px;
+  padding:12px; margin-bottom:14px;
 }
 .news-card{
   background:#161b22;
@@ -142,7 +136,7 @@ st.markdown(
 
 .countdown-bar{
   text-align:center; color:#6B7280;
-  margin-top:18px; padding:10px;
+  margin-top:16px; padding:10px;
   background:#0d1117; border:1px solid #30363d;
   border-radius:8px;
 }
@@ -169,7 +163,7 @@ def http_get_retry(url, params=None, headers=None, timeout=10, retries=3, backof
     raise last_exc if last_exc else RuntimeError("http_get_retry failed")
 
 # ==============================================================================
-# 5) DB (SQLite) — FULL FUNCTIONS
+# 5) DB (SQLite) — full funcs
 # ==============================================================================
 @st.cache_resource
 def init_db():
@@ -329,18 +323,14 @@ def parse_json_array_loose(s: str):
     return json.loads(raw)
 
 # ==============================================================================
-# 7) FETCH VNW NEWS (signature full params)
+# 7) VNW FETCH (signature)
 # ==============================================================================
 def fetch_latest_news(limit: int = 20):
     if not VNWALLSTREET_SECRET_KEY:
         return [], "Missing VNWALLSTREET_SECRET_KEY"
 
     API_URL = "https://vnwallstreet.com/api/inter/newsFlash/page"
-    HEADERS = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://vnwallstreet.com/",
-        "Accept": "application/json",
-    }
+    HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://vnwallstreet.com/", "Accept": "application/json"}
 
     try:
         ts_ms = int(time.time() * 1000)
@@ -368,102 +358,84 @@ def fetch_latest_news(limit: int = 20):
         return [], f"Fetch error: {e}"
 
 # ==============================================================================
-# 8) MARKET SNAPSHOT (YFinance -> fallback FRED)
+# 8) MARKET SNAPSHOT (YFinance sequential + delay + DB TTL cache)
 # ==============================================================================
-def _parse_fred_csv(csv_text: str):
-    lines = csv_text.strip().splitlines()
-    if len(lines) < 2:
-        return []
-    out = []
-    for row in lines[1:]:
-        parts = row.split(",")
-        if len(parts) < 2:
-            continue
-        d, v = parts[0].strip(), parts[1].strip()
-        if not d or v in (".", ""):
-            continue
+def yf_fetch_one_ticker(ticker: str):
+    df = yf.download(tickers=ticker, period="5d", interval="1d", progress=False, threads=False)
+    if df is None or df.empty or "Close" not in df:
+        return None
+    closes = df["Close"].dropna()
+    if len(closes) < 2:
+        return None
+    curr = float(closes.iloc[-1])
+    prev = float(closes.iloc[-2])
+    chg = (curr / prev - 1.0) * 100.0
+    return {"value": round(curr, 4), "chg_1d_pct": round(chg, 4)}
+
+def get_market_snapshot_dynamic(conn, ttl_seconds: int, delay_seconds: float):
+    """
+    DB cache keys: snapshot_json, snapshot_ts
+    - If cache fresh => return cached
+    - Else => sequential yfinance with delay; if blocked => return old cached if any
+    """
+    now = int(time.time())
+    cached_json = db_get_meta(conn, "snapshot_json")
+    cached_ts = db_get_meta(conn, "snapshot_ts")
+
+    if cached_json and cached_ts:
         try:
-            out.append((d, float(v)))
+            cached_ts_i = int(cached_ts)
+            if now - cached_ts_i < ttl_seconds:
+                snap = json.loads(cached_json)
+                snap["cache"] = True
+                return snap
         except Exception:
             pass
-    return out
 
-@st.cache_data(ttl=900, show_spinner=False)  # 15 minutes
-def get_market_snapshot():
-    """
-    Snapshot object:
-    {
-      "asof": "...",
-      "source": "yfinance"|"fred"|"none",
-      "data": { ... },
-      "text": "...",
-      "error": None|"..."
-    }
-    """
     snap = {
-        "asof": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "source": "none",
+        "asof_utc": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "source": "yfinance",
+        "cache": False,
         "data": {},
-        "text": "",
-        "error": None,
+        "error": None
     }
 
-    # 1) Try yfinance (can rate-limit)
-    if YF_AVAILABLE:
-        try:
-            df = yf.download(
-                tickers=list(YF_TICKERS.values()),
-                period="5d",
-                interval="1d",
-                progress=False,
-                threads=False,
-            )
-            if df is not None and not df.empty:
-                snap["source"] = "yfinance"
-                for name, ticker in YF_TICKERS.items():
-                    try:
-                        closes = df["Close"][ticker].dropna()
-                        if len(closes) >= 2:
-                            curr = float(closes.iloc[-1])
-                            prev = float(closes.iloc[-2])
-                            chg = (curr / prev - 1.0) * 100.0
-                            snap["data"][name] = {"value": round(curr, 3), "chg_1d_pct": round(chg, 3)}
-                    except Exception:
-                        pass
-        except Exception as e:
-            snap["error"] = f"yfinance error: {e}"
+    if not YF_AVAILABLE:
+        snap["source"] = "none"
+        snap["error"] = "yfinance not installed"
+        return snap
 
-    # 2) If yfinance didn’t return core macro, fallback to FRED (daily)
-    def _need_fred():
-        # need at least USD proxy + yields + vix to be useful
-        return not (("DXY" in snap["data"]) and ("US10Y" in snap["data"]) and ("VIX" in snap["data"]))
+    try:
+        for name, ticker in YF_TICKERS.items():
+            val = yf_fetch_one_ticker(ticker)
+            if val:
+                snap["data"][name] = val
+            time.sleep(max(0.0, float(delay_seconds)))
 
-    if _need_fred():
-        try:
-            snap["source"] = "fred"
-            for key, sid in FRED_SERIES.items():
-                url = FRED_CSV_URL.format(series_id=sid)
-                resp = http_get_retry(url, timeout=10, retries=3)
-                if resp.status_code != 200:
-                    continue
-                rows = _parse_fred_csv(resp.text)
-                if len(rows) < 2:
-                    continue
-                (d0, v0), (d1, v1) = rows[-2], rows[-1]
-                if key.startswith("us10y"):
-                    # yields in % => bps change = diff * 100
-                    chg_bps = (v1 - v0) * 100.0
-                    snap["data"][key] = {"series": sid, "date": d1, "value": v1, "chg_1d_bps": round(chg_bps, 3)}
-                else:
-                    chg_pct = (v1 / v0 - 1.0) * 100.0
-                    snap["data"][key] = {"series": sid, "date": d1, "value": v1, "chg_1d_pct": round(chg_pct, 3)}
-        except Exception as e:
-            snap["error"] = (snap["error"] + " | " if snap["error"] else "") + f"fred error: {e}"
-            snap["source"] = "none"
+        # store
+        db_set_meta(conn, "snapshot_json", json.dumps(snap, ensure_ascii=False))
+        db_set_meta(conn, "snapshot_ts", str(now))
+        return snap
 
-    # Build text block for AI prompt
-    snap["text"] = json.dumps(snap, ensure_ascii=False)
-    return snap
+    except Exception as e:
+        # if blocked, return cached if exists
+        if cached_json:
+            try:
+                old = json.loads(cached_json)
+                old["error"] = f"yfinance blocked/rate-limited: {e}"
+                old["source"] = old.get("source", "cache")
+                old["cache"] = True
+                return old
+            except Exception:
+                pass
+
+        snap["source"] = "none"
+        snap["error"] = f"yfinance blocked/rate-limited: {e}"
+        return snap
+
+def snapshot_to_prompt_block(snap: dict) -> str:
+    # keep compact
+    return json.dumps(snap, ensure_ascii=False)
 
 # ==============================================================================
 # 9) AI PROMPT + FALLBACK
@@ -472,11 +444,11 @@ def build_prompt(lang_instruction: str, n_items: int, snapshot_json: str) -> str
     return f"""
 You are an Elite Macro & Metals Strategist. Analyze news for XAU/USD (Gold vs USD).
 
-MARKET SNAPSHOT (pricing context; may be daily for some series):
+MARKET SNAPSHOT (pricing context; may be daily):
 {snapshot_json}
 
 INTER-MARKET:
-- Gold typically moves inverse to USD (DXY/proxy) and US Treasury yields (nominal/real).
+- Gold typically moves inverse to USD (DXY/proxy) and US Treasury yields.
 - If news implies USD up or yields up => XAU down => SELL.
 - If news implies USD down or yields down => XAU up => BUY.
 - War/geopolitical crisis/political unrest => safe haven => BUY.
@@ -512,7 +484,7 @@ def call_ai_with_fallback(english_items: list[str], lang_instruction: str, snaps
 
     n = len(english_items)
     user_content = "\n".join([f"ID {i}: {english_items[i]}" for i in range(n)])
-    system_prompt = build_prompt(lang_instruction, n, snapshot.get("text", "{}"))
+    system_prompt = build_prompt(lang_instruction, n, snapshot_to_prompt_block(snapshot))
 
     last_raw = None
     last_err = None
@@ -539,32 +511,36 @@ def call_ai_with_fallback(english_items: list[str], lang_instruction: str, snaps
     return [], None, last_raw, last_err or "All models failed"
 
 # ==============================================================================
-# 10) SESSION STATE (non-blocking refresh)
+# 10) SESSION STATE
 # ==============================================================================
 def ensure_state():
     if "next_refresh_at" not in st.session_state:
-        st.session_state.next_refresh_at = time.time() + AUTO_REFRESH_SECONDS
+        st.session_state.next_refresh_at = time.time() + DEFAULT_FULL_REFRESH
     if "force_refresh" not in st.session_state:
-        st.session_state.force_refresh = True  # first run fetches immediately
-    if "current_batch" not in st.session_state:
-        st.session_state.current_batch = []    # list of dicts: fp, ts
-    if "last_fetch_at" not in st.session_state:
-        st.session_state.last_fetch_at = 0.0
-    if "last_model_used" not in st.session_state:
-        st.session_state.last_model_used = ""
+        st.session_state.force_refresh = True
     if "last_status_msg" not in st.session_state:
         st.session_state.last_status_msg = ""
+    if "current_batch" not in st.session_state:
+        st.session_state.current_batch = []
+    if "_display_texts" not in st.session_state:
+        st.session_state._display_texts = []
+    if "_cached_scores" not in st.session_state:
+        st.session_state._cached_scores = []
+    if "_snapshot" not in st.session_state:
+        st.session_state._snapshot = {"source": "none", "data": {}, "error": "no snapshot"}
+    if "last_model_used" not in st.session_state:
+        st.session_state.last_model_used = ""
 
 ensure_state()
 
 # ==============================================================================
-# 11) CONTROL PANEL (language, timezone, refresh)
+# 11) CONTROL PANEL + INPUTS
 # ==============================================================================
 st.title(APP_TITLE)
 
 with st.container():
     st.markdown('<div class="control-panel">', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1.6, 1.6, 1])
+    c1, c2, c3, c4 = st.columns([1.4, 1.4, 1.2, 1.2])
 
     with c1:
         LANGUAGES = {"🇻🇳 Tiếng Việt": "vi", "🇬🇧 English": "en"}
@@ -584,10 +560,42 @@ with st.container():
         CURRENT_TZ = datetime.timezone(datetime.timedelta(hours=tz_offset))
 
     with c3:
-        st.write("")
-        if st.button("🔄 REFRESH", use_container_width=True):
+        full_refresh_seconds = st.number_input(
+            "⏱ Full refresh (s)",
+            min_value=60, max_value=1800,
+            value=int(st.session_state.get("full_refresh_seconds", DEFAULT_FULL_REFRESH)),
+            step=30
+        )
+        st.session_state.full_refresh_seconds = int(full_refresh_seconds)
+
+        snapshot_ttl_seconds = st.number_input(
+            "🧊 Snapshot TTL (s)",
+            min_value=60, max_value=7200,
+            value=int(st.session_state.get("snapshot_ttl_seconds", DEFAULT_SNAPSHOT_TTL)),
+            step=60
+        )
+        st.session_state.snapshot_ttl_seconds = int(snapshot_ttl_seconds)
+
+    with c4:
+        yf_delay = st.number_input(
+            "🐢 YF delay/ticker (s)",
+            min_value=0.0, max_value=5.0,
+            value=float(st.session_state.get("yf_delay", DEFAULT_YF_DELAY)),
+            step=0.1
+        )
+        st.session_state.yf_delay = float(yf_delay)
+
+        ui_tick_seconds = st.number_input(
+            "🖥 UI tick (s)",
+            min_value=1, max_value=30,
+            value=int(st.session_state.get("ui_tick_seconds", DEFAULT_UI_TICK)),
+            step=1
+        )
+        st.session_state.ui_tick_seconds = int(ui_tick_seconds)
+
+        if st.button("🔄 REFRESH NOW", use_container_width=True):
             st.session_state.force_refresh = True
-            st.session_state.next_refresh_at = time.time() + AUTO_REFRESH_SECONDS
+            st.session_state.next_refresh_at = time.time()  # refresh immediately
             st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -595,52 +603,51 @@ with st.container():
 st.caption(
     f"AI: {'ON' if AI_AVAILABLE else 'OFF'} | "
     f"VNW key: {'OK' if bool(VNWALLSTREET_SECRET_KEY) else 'MISSING'} | "
-    f"YF: {'ON' if YF_AVAILABLE else 'OFF'} | "
-    f"Prompt: {PROMPT_VERSION}"
+    f"YF: {'ON' if YF_AVAILABLE else 'OFF'} | Prompt: {PROMPT_VERSION}"
 )
 
 # ==============================================================================
-# 12) REFRESH TICK (no-block)
+# 12) UI TICK (no-block)
 # ==============================================================================
 if AUTOREFRESH_AVAILABLE:
-    st_autorefresh(interval=UI_TICK_SECONDS * 1000, key="ui_tick")
+    st_autorefresh(interval=st.session_state.ui_tick_seconds * 1000, key="ui_tick")
 
 now = time.time()
 do_refresh = st.session_state.force_refresh or (now >= st.session_state.next_refresh_at)
 
 # ==============================================================================
-# 13) MAIN PIPELINE (only runs on refresh)
+# 13) MAIN PIPELINE (only on full refresh)
 # ==============================================================================
 conn = init_db()
 
-snapshot = None
-raw_items = None
-fetch_err = None
-
 if do_refresh:
     st.session_state.force_refresh = False
-    st.session_state.last_fetch_at = now
-    st.session_state.next_refresh_at = now + AUTO_REFRESH_SECONDS
+    st.session_state.next_refresh_at = now + st.session_state.full_refresh_seconds
 
-    # 1) snapshot (cached + fallback)
-    snapshot = get_market_snapshot()
+    # (A) snapshot with DB TTL + yfinance delay
+    snapshot = get_market_snapshot_dynamic(
+        conn,
+        ttl_seconds=st.session_state.snapshot_ttl_seconds,
+        delay_seconds=st.session_state.yf_delay
+    )
 
-    # 2) fetch news
+    # (B) fetch news
     raw_items, fetch_err = fetch_latest_news(FETCH_LIMIT)
-
     if fetch_err:
         st.session_state.last_status_msg = f"Fetch error: {fetch_err}"
         raw_items = []
 
+    # If no news, still store snapshot for UI
+    st.session_state._snapshot = snapshot
+
     if raw_items:
-        # Build batch & upsert, translations, scoring decisions
         current = []
         english_texts = []
         display_texts = []
-
-        missing_score_indices = []
         cached_scores = []
+        missing_score_indices = []
 
+        # Build batch
         for it in raw_items:
             raw_text = normalize_text(it.get("title") or it.get("content") or "")
             raw_ts = int(it.get("createtime") or it.get("showtime") or 0)
@@ -650,28 +657,21 @@ if do_refresh:
             fp = fingerprint_item(raw_ts, raw_text)
             db_upsert_news(conn, fp, raw_ts, raw_text)
 
-            # ensure translations (EN + display)
             en = get_or_make_translation(conn, fp, raw_text, "en")
             disp = get_or_make_translation(conn, fp, raw_text, target_lang)
 
-            english_texts.append(en)
-            display_texts.append(disp)
-
             sc = db_get_score(conn, fp, PROMPT_VERSION)
-            cached_scores.append(sc)
 
             current.append({"fp": fp, "ts": raw_ts})
+            english_texts.append(en)
+            display_texts.append(disp)
+            cached_scores.append(sc)
 
-        # Which need scoring?
-        for i, item in enumerate(current):
+        for i in range(len(current)):
             if cached_scores[i] is None:
                 missing_score_indices.append(i)
 
-        # AI call only if at least one item missing score
-        used_model = None
-        ai_raw = None
-        ai_err = None
-
+        # (C) show first (gray) will happen in render section; here run AI only if needed
         if missing_score_indices:
             results, used_model, ai_raw, ai_err = call_ai_with_fallback(english_texts, ai_lang_instruction, snapshot)
 
@@ -680,7 +680,7 @@ if do_refresh:
                 db_set_meta(conn, "last_ai_model", used_model)
                 db_set_meta(conn, "last_ai_at", str(int(time.time())))
 
-            # map results
+            # map results by id
             res_map = {}
             if isinstance(results, list):
                 for r in results:
@@ -711,66 +711,52 @@ if do_refresh:
                 db_set_score(conn, fp, PROMPT_VERSION, used_model or "", signal, score, reason)
                 stored += 1
 
-            # reload cache scores for current
+            # reload scores
             cached_scores = [db_get_score(conn, it["fp"], PROMPT_VERSION) for it in current]
-            st.session_state.last_status_msg = f"Refreshed. New AI scores stored: {stored}."
+
+            st.session_state.last_status_msg = f"Refreshed. Stored new AI scores: {stored}."
             if ai_err:
                 st.session_state.last_status_msg += f" (AI err: {ai_err})"
         else:
             st.session_state.last_status_msg = "Refreshed. No new AI scoring needed."
 
-        # Save into session_state for UI ticks
         st.session_state.current_batch = current
         st.session_state._display_texts = display_texts
         st.session_state._cached_scores = cached_scores
-        st.session_state._snapshot = snapshot
 
     else:
         st.session_state.current_batch = []
         st.session_state._display_texts = []
         st.session_state._cached_scores = []
-        st.session_state._snapshot = get_market_snapshot()
         st.session_state.last_status_msg = "Refreshed. No news returned."
 
 # ==============================================================================
-# 14) RENDER (works also during UI ticks without refetch)
+# 14) RENDER (always; during UI ticks doesn't refetch)
 # ==============================================================================
-snapshot = st.session_state.get("_snapshot") or {"source": "none", "data": {}, "error": "no snapshot"}
+snapshot = st.session_state.get("_snapshot") or {}
 display_texts = st.session_state.get("_display_texts") or []
 cached_scores = st.session_state.get("_cached_scores") or []
 current_batch = st.session_state.get("current_batch") or []
 
-# Snapshot box
-with st.container():
-    d = snapshot.get("data", {})
-    st.markdown("<div class='snapshot-box'>", unsafe_allow_html=True)
-    st.markdown(f"<div class='small-muted'>Market Snapshot source: <b>{snapshot.get('source')}</b> • asof: {snapshot.get('asof')}</div>", unsafe_allow_html=True)
+# Snapshot UI
+d = snapshot.get("data", {})
+st.markdown("<div class='snapshot-box'>", unsafe_allow_html=True)
+st.markdown(
+    f"<div class='small-muted'>Snapshot source: <b>{snapshot.get('source','none')}</b> • "
+    f"cache: {snapshot.get('cache', False)} • asof: {snapshot.get('asof_utc','')}</div>",
+    unsafe_allow_html=True
+)
+if snapshot.get("error"):
+    st.markdown(f"<div class='small-muted'>Snapshot error: {snapshot.get('error')}</div>", unsafe_allow_html=True)
 
-    # Print yfinance metrics if available
-    if any(k in d for k in ("DXY", "US10Y", "VIX", "GOLD", "SILVER")):
-        for k in ("DXY", "US10Y", "VIX", "GOLD", "SILVER"):
-            if k in d:
-                st.markdown(f"<div class='kv'><span>{k}</span><span>{d[k].get('value')} | {d[k].get('chg_1d_pct', 'N/A')}%</span></div>", unsafe_allow_html=True)
+for k in ("DXY", "US10Y", "VIX", "GOLD", "SILVER"):
+    if k in d:
+        st.markdown(f"<div class='kv'><span>{k}</span><span>{d[k].get('value')} | Δ1D {d[k].get('chg_1d_pct')}%</span></div>", unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
 
-    # Print FRED fallback metrics if available
-    for k in ("usd_proxy_dtwexbgs", "us10y_dgs10", "us10y_real_dfii10", "vix_vixcls"):
-        if k in d:
-            val = d[k].get("value")
-            if "chg_1d_bps" in d[k]:
-                ch = d[k].get("chg_1d_bps")
-                st.markdown(f"<div class='kv'><span>{k}</span><span>{val} | Δ1D {ch} bps</span></div>", unsafe_allow_html=True)
-            else:
-                ch = d[k].get("chg_1d_pct")
-                st.markdown(f"<div class='kv'><span>{k}</span><span>{val} | Δ1D {ch}%</span></div>", unsafe_allow_html=True)
-
-    if snapshot.get("error"):
-        st.markdown(f"<div class='small-muted'>Snapshot error: {snapshot.get('error')}</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# Status
 st.caption(st.session_state.get("last_status_msg", ""))
 
-# Dashboard + list
+# If we have a batch, render dashboard + list
 if current_batch and display_texts and cached_scores and len(current_batch) == len(display_texts) == len(cached_scores):
     buy_sell_scores = []
     for sc in cached_scores:
@@ -810,7 +796,6 @@ if current_batch and display_texts and cached_scores and len(current_batch) == l
         unsafe_allow_html=True,
     )
 
-    # Render each item
     for i, item in enumerate(current_batch):
         sc = cached_scores[i]
         sig = (sc.get("signal") if sc else "SIDEWAY").upper() if sc else "SIDEWAY"
@@ -818,13 +803,10 @@ if current_batch and display_texts and cached_scores and len(current_batch) == l
         reason = sc.get("reason") if sc else ""
 
         if sig == "BUY" and score > 0:
-            color = "#10B981"
-            label = "BUY XAU"
+            color, label = "#10B981", "BUY XAU"
         elif sig == "SELL" and score > 0:
-            color = "#EF4444"
-            label = "SELL XAU"
+            color, label = "#EF4444", "SELL XAU"
         else:
-            # SIDEWAY
             color = "#FFD700" if score > 0 else "#6B7280"
             label = "SIDEWAY"
 
@@ -845,17 +827,15 @@ if current_batch and display_texts and cached_scores and len(current_batch) == l
             unsafe_allow_html=True,
         )
 else:
-    st.warning("⚠️ No cached batch to display yet. Press REFRESH.")
+    st.info("Nhấn REFRESH NOW để tải lần đầu hoặc kiểm tra secrets/key.")
 
-# ==============================================================================
-# 15) COUNTDOWN BAR (non-blocking)
-# ==============================================================================
+# Countdown (no blocking)
 seconds_left = max(0, int(st.session_state.next_refresh_at - time.time()))
 st.markdown(
     f"""
     <div class="countdown-bar">
-        ⏳ Next refresh in <b style="color:#FFD700;">{seconds_left}</b>s
-        <span class="small-muted">| Full refresh interval: {AUTO_REFRESH_SECONDS}s</span>
+        ⏳ Next full refresh in <b style="color:#FFD700;">{seconds_left}</b>s
+        <span class="small-muted">| UI tick: {st.session_state.ui_tick_seconds}s</span>
     </div>
     """,
     unsafe_allow_html=True,
