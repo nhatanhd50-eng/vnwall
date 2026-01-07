@@ -26,19 +26,18 @@ except Exception:
 # ==============================================================================
 # 0) CONFIG
 # ==============================================================================
-APP_TITLE = "🏆 XAU/USD Intelligence (M15 Snapshot Gate + Incremental)"
+APP_TITLE = "🏆 XAU/USD Intelligence (M15 Snapshot Gate + Incremental + Macro Prompt)"
 DB_PATH = "xau_cache.sqlite3"
-PROMPT_VERSION = "xau_m15_snapshot_gate_v1"
+PROMPT_VERSION = "xau_m15_gate_macro_v1"
 FETCH_LIMIT = 20
 
-# AI fallback models
 MODEL_LIST = [
     "gpt-oss-120b",
     "qwen-3-235b-a22b-instruct-2507",
     "qwen-3-32b",
 ]
 
-# yfinance tickers (NOTE: some may return empty on 15m -> we will show N/A, no fallback)
+# yfinance tickers (NO fallback; if M15 empty => N/A)
 YF_TICKERS = {
     "DXY": "DX-Y.NYB",
     "US10Y": "^TNX",
@@ -46,6 +45,11 @@ YF_TICKERS = {
     "GOLD": "GC=F",
     "SILVER": "SI=F",
 }
+
+DEFAULT_NEWS_REFRESH_SECONDS = 180
+DEFAULT_UI_TICK_SECONDS = 5
+DEFAULT_YF_DELAY_SECONDS = 1.0
+M15_SAFETY_SECONDS = 10
 
 # ==============================================================================
 # 1) SECRETS
@@ -78,6 +82,7 @@ except Exception:
 # 3) UI + CSS
 # ==============================================================================
 st.set_page_config(page_title=APP_TITLE, page_icon="🏆", layout="centered")
+
 st.markdown(
     """
 <style>
@@ -159,7 +164,7 @@ def http_get_retry(url, params=None, headers=None, timeout=10, retries=3, backof
     raise last_exc if last_exc else RuntimeError("http_get_retry failed")
 
 # ==============================================================================
-# 5) DB (SQLite) — full funcs
+# 5) DB (SQLite) — FULL FUNCTIONS
 # ==============================================================================
 @st.cache_resource
 def init_db():
@@ -354,31 +359,22 @@ def fetch_latest_news(limit: int = 20):
         return [], f"Fetch error: {e}"
 
 # ==============================================================================
-# 8) M15 GATE: compute last completed M15 close key (UTC)
+# 8) M15 GATE (UTC)
 # ==============================================================================
 def last_completed_m15_key_utc(safety_seconds: int = 10) -> str:
-    """
-    Returns key like '2026-01-07 04:45' UTC for last completed 15m boundary.
-    We subtract safety_seconds to avoid hitting exactly at boundary when data not ready.
-    """
     now = datetime.datetime.utcnow() - datetime.timedelta(seconds=safety_seconds)
     minute_bucket = (now.minute // 15) * 15
     t = now.replace(minute=minute_bucket, second=0, microsecond=0)
     return t.strftime("%Y-%m-%d %H:%M")
 
 def next_m15_close_seconds_left(safety_seconds: int = 10) -> int:
-    """
-    Countdown to next M15 boundary (approx, UTC), for UI display.
-    """
     now = datetime.datetime.utcnow()
-    # next boundary minute: ceil to 15
     next_min_bucket = ((now.minute // 15) + 1) * 15
     nxt = now.replace(second=0, microsecond=0)
     if next_min_bucket >= 60:
         nxt = (nxt + datetime.timedelta(hours=1)).replace(minute=0)
     else:
         nxt = nxt.replace(minute=next_min_bucket)
-    # we also add safety seconds (because we fetch after close + safety)
     nxt = nxt + datetime.timedelta(seconds=safety_seconds)
     return max(0, int((nxt - now).total_seconds()))
 
@@ -386,63 +382,52 @@ def next_m15_close_seconds_left(safety_seconds: int = 10) -> int:
 # 9) YFINANCE M15 FETCH (NO FALLBACK): sequential + delay
 # ==============================================================================
 def yf_fetch_m15_one(ticker: str):
-    """
-    Returns dict:
-      { ok: bool, price: float|None, chg_15m_pct: float|None, last_bar_utc: str|None }
-    No fallback, if empty -> ok False.
-    """
     if not YF_AVAILABLE:
-        return {"ok": False, "price": None, "chg_15m_pct": None, "last_bar_utc": None}
+        return {"ok": False, "price": None, "chg_15m_pct": None, "last_bar": None}
 
     df = yf.download(tickers=ticker, period="5d", interval="15m", progress=False, threads=False)
     if df is None or df.empty or "Close" not in df:
-        return {"ok": False, "price": None, "chg_15m_pct": None, "last_bar_utc": None}
+        return {"ok": False, "price": None, "chg_15m_pct": None, "last_bar": None}
 
     closes = df["Close"].dropna()
     if len(closes) < 2:
-        return {"ok": False, "price": None, "chg_15m_pct": None, "last_bar_utc": None}
+        return {"ok": False, "price": None, "chg_15m_pct": None, "last_bar": None}
 
     curr = float(closes.iloc[-1])
     prev = float(closes.iloc[-2])
     chg = (curr / prev - 1.0) * 100.0
 
-    # last index might be tz-aware; stringify safely
     try:
-        last_idx = closes.index[-1]
-        last_bar = str(last_idx)
+        last_bar = str(closes.index[-1])
     except Exception:
         last_bar = None
 
-    return {"ok": True, "price": round(curr, 6), "chg_15m_pct": round(chg, 6), "last_bar_utc": last_bar}
+    return {
+        "ok": True,
+        "price": round(curr, 6),
+        "chg_15m_pct": round(chg, 6),
+        "last_bar": last_bar
+    }
 
 def update_snapshot_if_m15_closed(conn, per_ticker_delay: float, safety_seconds: int = 10):
-    """
-    Gate snapshot update by M15 close key.
-    - store snapshot under meta keys: snapshot_json, snapshot_m15_key, snapshot_attempt_key
-    - attempt at most once per m15 key
-    - if fetch fails -> keep old snapshot but store attempt key so we don't hammer
-    """
     key = last_completed_m15_key_utc(safety_seconds=safety_seconds)
 
     last_key = db_get_meta(conn, "snapshot_m15_key") or ""
     attempt_key = db_get_meta(conn, "snapshot_attempt_key") or ""
     cached_json = db_get_meta(conn, "snapshot_json")
 
-    # already attempted this interval -> return cached
     if attempt_key == key and cached_json:
         try:
             return json.loads(cached_json)
         except Exception:
             pass
 
-    # if already updated for this key -> return cached
     if last_key == key and cached_json:
         try:
             return json.loads(cached_json)
         except Exception:
             pass
 
-    # mark attempt (so if yfinance blocks, we won't retry until next candle)
     db_set_meta(conn, "snapshot_attempt_key", key)
 
     snapshot = {
@@ -451,64 +436,88 @@ def update_snapshot_if_m15_closed(conn, per_ticker_delay: float, safety_seconds:
         "source": "yfinance_15m",
         "data": {},
         "error": None,
-        "note": "No fallback. If ticker has no 15m data => N/A."
+        "note": "NO FALLBACK. If 15m data missing => N/A."
     }
 
     if not YF_AVAILABLE:
-        snapshot["error"] = "yfinance not available"
+        snapshot["error"] = "yfinance not installed"
     else:
         for name, ticker in YF_TICKERS.items():
             try:
                 snapshot["data"][name] = yf_fetch_m15_one(ticker)
             except Exception as e:
-                snapshot["data"][name] = {"ok": False, "price": None, "chg_15m_pct": None, "last_bar_utc": None}
+                snapshot["data"][name] = {"ok": False, "price": None, "chg_15m_pct": None, "last_bar": None}
                 snapshot["error"] = f"yfinance error: {e}"
             time.sleep(max(0.0, float(per_ticker_delay)))
 
-    # store snapshot (even if partial/empty) and mark key updated
     db_set_meta(conn, "snapshot_json", json.dumps(snapshot, ensure_ascii=False))
     db_set_meta(conn, "snapshot_m15_key", key)
-
     return snapshot
 
 # ==============================================================================
-# 10) AI PROMPT with snapshot-awareness (can be empty)
+# 10) AI PROMPT (FULL macro logic incl. Fed/Inflation/Risk-off USD+Gold)
 # ==============================================================================
 def build_prompt(lang_instruction: str, n_items: int, snapshot_json: str) -> str:
     return f"""
-You are an Elite Macro & Metals Strategist. Analyze news for XAU/USD (Gold vs USD).
+You are an Elite Macro & Metals Strategist. Score NEWS for XAU/USD (Gold vs USD).
 
-MARKET SNAPSHOT (15m bars). IMPORTANT:
-- Some instruments may be missing (N/A) due to data unavailable.
-- If snapshot fields are missing or N/A, treat them as UNKNOWN (do NOT hallucinate).
-- In that case rely more on NEWS and set confidence/score conservatively.
+SNAPSHOT NOTICE (M15 snapshot may be missing/N/A):
+- If snapshot values are N/A/missing => treat as UNKNOWN.
+- Do NOT hallucinate moves; rely more on news and be conservative.
+- If missing snapshot reduces confidence, mention it briefly.
 
 SNAPSHOT_JSON:
 {snapshot_json}
 
-INTER-MARKET:
-- Gold often moves inverse to USD (DXY) and US yields (US10Y).
-- If news implies USD up or yields up => XAU down => SELL.
-- If news implies USD down or yields down => XAU up => BUY.
-- War/geopolitical crisis/political unrest => safe haven => BUY.
+MACRO DRIVERS (Correct trader logic):
 
-RELEVANCE FILTER (MANDATORY):
-- If a news item has NO meaningful link to:
-  (USD/DXY, US yields/treasuries, Fed/US macro, geopolitical risk, precious metals),
-  then: signal="SIDEWAY" AND score=0.0.
+A) YIELDS + USD:
+- Rising US yields (especially real yields) is typically bearish for gold.
+- Rising USD (DXY) is typically bearish for gold.
+- Falling yields and/or falling USD is typically bullish for gold.
+
+B) FED / CENTRAL BANK SPEAK (hawkish vs dovish):
+- Hawkish (higher-for-longer, restrictive, inflation risk) => tends to lift yields => SELL bias for gold.
+- Dovish (rate cuts, easing, inflation falling, growth concern) => tends to lower yields => BUY bias for gold.
+- If unclear => SIDEWAY with low/moderate score.
+
+C) INFLATION PRINTS (CPI/PCE) + FED REACTION FUNCTION:
+- Hot inflation can be inflation-hedge bullish for gold BUT can also trigger hawkish Fed => yields up => gold down.
+- Decide direction by expected Fed reaction / yields impact:
+  - If hot CPI/PCE likely => hawkish Fed / yields UP => SELL or cautious SIDEWAY.
+  - If soft CPI/PCE => dovish Fed / yields DOWN => BUY.
+- If snapshot shows yields already jumped after the print => stronger SELL confidence.
+
+D) EXTREME RISK-OFF CASE (USD + GOLD both up allowed):
+- In severe crisis (war escalation, coup, systemic stress), USD can rise for liquidity AND gold can rise as safe haven.
+- You ARE allowed to output BUY gold even if USD is also rising, if risk-off dominates.
+- If you do so, explicitly say: "risk-off dominates; USD also bid but gold safe haven".
+
+E) OIL / ENERGY NEWS:
+- Treat oil news as RELEVANT only when it clearly affects inflation expectations, Fed/yields path, or geopolitical/supply risk.
+- Supply shock / geopolitical escalation (OPEC+ surprise cuts, attacks, Hormuz risk) => often BUY gold.
+- Minor oil chatter/company-only oil news without macro implication => NO EDGE => SIDEWAY score=0.0.
 
 PRECIOUS METALS CO-MOVE:
-- Gold (XAU) and Silver (XAG) are precious metals and often move in the SAME direction.
+- Gold (XAU) and Silver (XAG) are precious metals; they often move in the same direction under USD/yields/risk regimes.
+
+RELEVANCE FILTER (MANDATORY):
+- If news has NO meaningful link to:
+  (USD/DXY, yields, Fed/CB speak, CPI/PCE/inflation, geopolitics/risk-off, precious metals, or oil macro channels)
+  => signal="SIDEWAY" AND score=0.0.
+
+SIDEWAY WITH NONZERO:
+- If relevant but mixed/uncertain => signal="SIDEWAY" with score 0.10..0.60.
 
 OUTPUT:
 - Return ONLY a valid JSON Array (no markdown).
 - Must include every ID 0..{n_items-1}.
-- Schema per item:
+- Schema:
   {{
     "id": int,
     "signal": "BUY"|"SELL"|"SIDEWAY",
     "score": float 0.0..0.99,
-    "reason": "Explanation in {lang_instruction} (max 18 words; mention snapshot missing if relevant)"
+    "reason": "Explain in {lang_instruction} (max 18 words)"
   }}
 
 PROMPT_VERSION: {PROMPT_VERSION}
@@ -551,16 +560,16 @@ def call_ai_with_fallback(english_items: list[str], lang_instruction: str, snaps
 # ==============================================================================
 def ensure_state():
     if "next_news_refresh_at" not in st.session_state:
-        st.session_state.next_news_refresh_at = time.time() + 180
+        st.session_state.next_news_refresh_at = time.time() + DEFAULT_NEWS_REFRESH_SECONDS
     if "force_news_refresh" not in st.session_state:
         st.session_state.force_news_refresh = True
 
     if "ui_tick_seconds" not in st.session_state:
-        st.session_state.ui_tick_seconds = 5
+        st.session_state.ui_tick_seconds = DEFAULT_UI_TICK_SECONDS
     if "news_refresh_seconds" not in st.session_state:
-        st.session_state.news_refresh_seconds = 180
+        st.session_state.news_refresh_seconds = DEFAULT_NEWS_REFRESH_SECONDS
     if "yf_delay" not in st.session_state:
-        st.session_state.yf_delay = 1.0
+        st.session_state.yf_delay = DEFAULT_YF_DELAY_SECONDS
 
     if "last_status_msg" not in st.session_state:
         st.session_state.last_status_msg = ""
@@ -576,10 +585,9 @@ def ensure_state():
 ensure_state()
 
 # ==============================================================================
-# 12) CONTROL PANEL (language, timezone, refresh, inputs)
+# 12) CONTROL PANEL
 # ==============================================================================
 st.title(APP_TITLE)
-
 conn = init_db()
 
 with st.container():
@@ -644,15 +652,11 @@ if AUTOREFRESH_AVAILABLE:
     st_autorefresh(interval=st.session_state.ui_tick_seconds * 1000, key="ui_tick")
 
 # ==============================================================================
-# 14) SNAPSHOT UPDATE (M15 gate) — ALWAYS SAFE
+# 14) SNAPSHOT UPDATE (M15 gate)
 # ==============================================================================
-snapshot = update_snapshot_if_m15_closed(
-    conn,
-    per_ticker_delay=st.session_state.yf_delay,
-    safety_seconds=10
-)
+snapshot = update_snapshot_if_m15_closed(conn, per_ticker_delay=st.session_state.yf_delay, safety_seconds=M15_SAFETY_SECONDS)
 
-# Render snapshot box
+# Render snapshot
 st.markdown("<div class='snapshot-box'>", unsafe_allow_html=True)
 st.markdown(
     f"<div class='small-muted'>Snapshot M15 key (UTC): <b>{snapshot.get('m15_key_utc')}</b> • asof UTC: {snapshot.get('asof_utc')}</div>",
@@ -672,7 +676,7 @@ for k, v in snapshot.get("data", {}).items():
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ==============================================================================
-# 15) NEWS REFRESH SCHEDULE (keep your news refresh time)
+# 15) NEWS REFRESH SCHEDULE
 # ==============================================================================
 now = time.time()
 do_news_refresh = st.session_state.force_news_refresh or (now >= st.session_state.next_news_refresh_at)
@@ -702,11 +706,9 @@ if do_news_refresh:
             fp = fingerprint_item(raw_ts, raw_text)
             db_upsert_news(conn, fp, raw_ts, raw_text)
 
-            # translations (incremental)
             en = get_or_make_translation(conn, fp, raw_text, "en")
             disp = get_or_make_translation(conn, fp, raw_text, target_lang)
 
-            # score cache (incremental)
             sc = db_get_score(conn, fp, PROMPT_VERSION)
 
             current.append({"fp": fp, "ts": raw_ts})
@@ -727,7 +729,6 @@ if do_news_refresh:
                 db_set_meta(conn, "last_ai_model", used_model)
                 db_set_meta(conn, "last_ai_at", str(int(time.time())))
 
-            # map results by id
             res_map = {}
             if isinstance(results, list):
                 for r in results:
@@ -757,7 +758,6 @@ if do_news_refresh:
                 db_set_score(conn, fp, PROMPT_VERSION, used_model or "", signal, score, reason)
                 stored += 1
 
-            # reload scores
             cached_scores = [db_get_score(conn, it["fp"], PROMPT_VERSION) for it in current]
             st.session_state.last_status_msg = f"News refreshed. Stored new AI scores: {stored}."
             if ai_err:
@@ -765,10 +765,10 @@ if do_news_refresh:
         else:
             st.session_state.last_status_msg = "News refreshed. No new AI scoring needed."
 
-        # store session for UI ticks
         st.session_state.current_batch = current
         st.session_state._display_texts = display_texts
         st.session_state._cached_scores = cached_scores
+
     else:
         st.session_state.current_batch = []
         st.session_state._display_texts = []
@@ -776,7 +776,7 @@ if do_news_refresh:
         st.session_state.last_status_msg = "News refreshed. No news returned."
 
 # ==============================================================================
-# 16) RENDER dashboard + list (from cached session state)
+# 16) RENDER dashboard + list
 # ==============================================================================
 st.caption(st.session_state.get("last_status_msg", ""))
 
@@ -799,13 +799,13 @@ if current_batch and display_texts and cached_scores and len(current_batch) == l
     avg = statistics.mean(buy_sell_scores) if buy_sell_scores else 0.0
     if avg > 0.15:
         trend, tcolor = "LONG / BUY XAUUSD 📈", "#10B981"
-        msg = "Bias BUY (based on news + snapshot if available)"
+        msg = "Bias BUY (macro rules incl. Fed/Inflation/Risk-off) + snapshot if available"
     elif avg < -0.15:
         trend, tcolor = "SHORT / SELL XAUUSD 📉", "#EF4444"
-        msg = "Bias SELL (based on news + snapshot if available)"
+        msg = "Bias SELL (macro rules incl. Fed/Inflation/Risk-off) + snapshot if available"
     else:
         trend, tcolor = "SIDEWAY / WAIT ⚠️", "#FFD700"
-        msg = "No strong edge (or many items are irrelevant => score 0.0)"
+        msg = "No strong edge (or many items irrelevant => score 0.0)"
 
     model_used = st.session_state.get("last_model_used") or db_get_meta(conn, "last_ai_model") or "(none)"
     st.markdown(
@@ -857,16 +857,16 @@ else:
     st.info("Nhấn REFRESH NOW để tải tin lần đầu.")
 
 # ==============================================================================
-# 17) COUNTDOWN BAR (no-block)
+# 17) COUNTDOWN BAR
 # ==============================================================================
 news_left = max(0, int(st.session_state.next_news_refresh_at - time.time()))
-m15_left = next_m15_close_seconds_left(safety_seconds=10)
+m15_left = next_m15_close_seconds_left(safety_seconds=M15_SAFETY_SECONDS)
 
 st.markdown(
     f"""
     <div class="countdown-bar">
         ⏳ Next NEWS refresh in <b style="color:#FFD700;">{news_left}</b>s
-        <span class="small-muted">| Next M15 close fetch in ~{m15_left}s (UTC)</span>
+        <span class="small-muted">| Next M15 snapshot in ~{m15_left}s (UTC)</span>
     </div>
     """,
     unsafe_allow_html=True,
