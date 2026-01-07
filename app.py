@@ -9,7 +9,7 @@ import re
 import sqlite3
 from deep_translator import GoogleTranslator
 
-# Thay thế TradingView bằng Yahoo Finance
+# Thay thế TradingView bằng Yahoo Finance (Đơn giản, không cần Cookie)
 try:
     import yfinance as yf
     YF_AVAILABLE = True
@@ -17,26 +17,27 @@ except ImportError:
     YF_AVAILABLE = False
 
 # ==============================================================================
-# 1. CẤU HÌNH HỆ THỐNG
+# 1. CẤU HÌNH HỆ THỐNG (GLOBAL CONFIG)
 # ==============================================================================
-# SECRETS (Lấy từ Streamlit Secrets hoặc Environment)
+# --- CẤU HÌNH THỜI GIAN REFRESH (FIX LỖI NAME ERROR) ---
+AUTO_REFRESH_SECONDS = 120  # Tự động làm mới sau 120 giây
+
+# SECRETS
 def _get_secret(name, default=""):
     try: return str(st.secrets.get(name, "")).strip() or default
     except: return default
 
-# API Key & Model
 LLM_API_KEY = _get_secret("CEREBRAS_API_KEY", "csk-dwtjyxt4yrvdxf2d28fk3x8whdkdtf526njm925enm3pt32w")
 VNWALLSTREET_SECRET_KEY = _get_secret("VNWALLSTREET_SECRET_KEY", "zxadpfiadfjapppasdfdddddddddddddfffffffffffffffffdfa3123123123")
 LLM_MODEL = "gpt-oss-120b"
 
-# Fallback Models
+# Danh sách model fallback
 MODEL_LIST = [LLM_MODEL, "llama-3.1-70b-instruct", "qwen-3-235b-a22b-instruct-2507"]
 
-# Database Config
 DB_PATH = "gold_ai.db"
-PROMPT_VERSION = "v5_yfinance_context"
+PROMPT_VERSION = "v6_final_stable"
 
-# Khởi tạo AI Client
+# Khởi tạo Client Cerebras
 try:
     from cerebras.cloud.sdk import Cerebras
     client = Cerebras(api_key=LLM_API_KEY)
@@ -45,7 +46,7 @@ except:
     AI_AVAILABLE = False
 
 # ==============================================================================
-# 2. GIAO DIỆN & CSS (DARK GOLD THEME)
+# 2. GIAO DIỆN & CSS
 # ==============================================================================
 st.set_page_config(page_title="Gold AI Pro", page_icon="🏆", layout="centered")
 
@@ -87,15 +88,7 @@ st.markdown("""
     .ai-reason { display: block; margin-top: 8px; padding-top: 8px; border-top: 1px dashed #374151; color: #F59E0B; font-size: 0.9em; font-style: italic; }
     .time-badge { color: #6B7280; font-family: monospace; font-size: 0.85em; margin-right: 8px; }
     .news-text { color: #e6edf3; font-size: 15px; line-height: 1.5; font-weight: 500; }
-    .countdown-bar { text-align: center; color: #6B7280; margin-top: 20px; padding: 10px; background: #0d1117; border-radius: 8px; }
-    
-    /* METRICS */
-    .metric-container { display: flex; justify-content: space-between; text-align: center; margin-bottom: 10px; }
-    .metric-box { background: #161b22; padding: 10px; border-radius: 8px; width: 19%; border: 1px solid #333; }
-    .metric-label { font-size: 0.8em; color: #888; }
-    .metric-value { font-size: 1.1em; font-weight: bold; color: #eee; }
-    .metric-delta-up { color: #10B981; font-size: 0.8em; }
-    .metric-delta-down { color: #EF4444; font-size: 0.8em; }
+    .countdown-bar { text-align: center; color: #6B7280; margin-top: 20px; padding: 10px; background: #0d1117; border-radius: 8px; border: 1px solid #333; }
     
     @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
     .ai-loading { color: #F59E0B; font-style: italic; animation: pulse 1.5s infinite; }
@@ -103,12 +96,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 3. DATABASE & UTILS (CACHE LAYER)
+# 3. DATABASE & CACHE
 # ==============================================================================
 @st.cache_resource
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
+    # Tạo bảng nếu chưa có
     c.execute("CREATE TABLE IF NOT EXISTS news (fp TEXT PRIMARY KEY, ts INTEGER, text TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS trans (fp TEXT, lang TEXT, text TEXT, PRIMARY KEY(fp, lang))")
     c.execute("CREATE TABLE IF NOT EXISTS scores (fp TEXT, ver TEXT, model TEXT, signal TEXT, score REAL, reason TEXT, PRIMARY KEY(fp, ver))")
@@ -143,34 +137,31 @@ def translate_text(text, lang):
     except: return text
 
 # ==============================================================================
-# 4. MARKET SNAPSHOT (YAHOO FINANCE - NO COOKIE NEEDED)
+# 4. MARKET SNAPSHOT (YAHOO FINANCE)
 # ==============================================================================
-@st.cache_data(ttl=300, show_spinner=False) # Cache 5 phút
+@st.cache_data(ttl=300, show_spinner=False)
 def get_market_snapshot():
+    """Lấy dữ liệu Vĩ mô từ Yahoo Finance (Không cần cookie)"""
     if not YF_AVAILABLE:
         return {"error": "Thiếu thư viện yfinance"}
     
-    # Symbol Map: Name -> YF Ticker
     tickers = {
-        "DXY": "DX-Y.NYB",   # Dollar Index
-        "US10Y": "^TNX",     # 10Y Yield
-        "VIX": "^VIX",       # Volatility
-        "GOLD": "GC=F",      # Gold Futures
-        "SILVER": "SI=F"     # Silver Futures
+        "DXY": "DX-Y.NYB",   
+        "US10Y": "^TNX",     
+        "VIX": "^VIX",       
+        "GOLD": "GC=F",      
+        "SILVER": "SI=F"     
     }
     
     snapshot = {"data": {}, "text": "", "error": None}
-    snap_text = "MARKET CONTEXT (Yahoo Finance):\n"
+    snap_text = "MARKET CONTEXT (Real-time):\n"
     
     try:
-        # Download 1 lần cho nhanh
         data = yf.download(tickers=list(tickers.values()), period="5d", interval="1d", progress=False)
         
-        # Xử lý dữ liệu (Lấy giá đóng cửa mới nhất và % thay đổi)
         for name, ticker in tickers.items():
             try:
-                # Lấy Close price của ticker
-                # yfinance trả về MultiIndex columns nếu tải nhiều ticker
+                # Xử lý MultiIndex của YFinance mới
                 if len(tickers) > 1:
                     closes = data['Close'][ticker].dropna()
                 else:
@@ -186,20 +177,16 @@ def get_market_snapshot():
                         "change": round(change_pct, 2)
                     }
                     snap_text += f"- {name}: {current:.2f} ({change_pct:+.2f}%)\n"
-                else:
-                    snapshot["data"][name] = {"price": 0, "change": 0}
             except:
                 continue
-                
         snapshot["text"] = snap_text
-        
     except Exception as e:
         snapshot["error"] = str(e)
         
     return snapshot
 
 # ==============================================================================
-# 5. FETCH NEWS (API)
+# 5. FETCH NEWS (API VNWALLSTREET)
 # ==============================================================================
 def fetch_news():
     try:
@@ -222,12 +209,12 @@ def fetch_news():
 def run_ai_analysis(news_list, lang_instruction, market_text):
     if not AI_AVAILABLE: return [], None
     
-    # 1. Prepare Input (English)
+    # Gom tin vào Prompt
     content_str = market_text + "\nNEWS LIST:\n"
     for item in news_list:
-        content_str += f"ID {item['id']}: {item['text_en']}\n"
+        # ID này là index trong list batch
+        content_str += f"ID {item['batch_id']}: {item['text_en']}\n"
 
-    # 2. Prompt (Logic Vàng & Bạc)
     system_prompt = f"""
     You are an Elite Gold Trader AI.
     
@@ -251,15 +238,17 @@ def run_ai_analysis(news_list, lang_instruction, market_text):
                 temperature=0.1, max_tokens=4000
             )
             raw = resp.choices[0].message.content
+            # Clean JSON
             json_str = raw.split("```json")[1].split("```")[0] if "```json" in raw else raw
-            if "]" in json_str: json_str = json_str[:json_str.rfind("]")+1]
+            # Fix lỗi cắt cụt
+            if "]" not in json_str: json_str += "]" 
             return json.loads(json_str), model
         except: continue
         
     return [], None
 
 # ==============================================================================
-# 7. MAIN APP
+# 7. MAIN APP (LOGIC CHÍNH)
 # ==============================================================================
 conn = init_db()
 st.title("🏆 Gold & Silver AI Intelligence")
@@ -289,6 +278,8 @@ if "data" in snapshot and snapshot["data"]:
             d = snapshot["data"][m]
             # Màu sắc: DXY/US10Y tăng là xấu cho Gold (Đỏ), giảm là tốt (Xanh)
             is_inverse = m in ["DXY", "US10Y"]
+            # Logic: Nếu DXY tăng -> Đỏ. Nếu Gold tăng -> Xanh.
+            # Delta color 'inverse' nghĩa là Tăng = Đỏ.
             color = "inverse" if is_inverse else "normal"
             with cols[i]:
                 st.metric(m, f"{d['price']}", f"{d['change']}%", delta_color=color)
@@ -296,10 +287,10 @@ if "data" in snapshot and snapshot["data"]:
 # --- NEWS PROCESSING ---
 raw_data = fetch_news()
 if raw_data:
-    # 1. Dedup & Translate (Incremental)
     processed_list = []
     missing_score_indices = []
     
+    # 1. Dedup & Translate
     for idx, item in enumerate(raw_data):
         ts = int(item.get('createtime') or 0)
         if ts > 1000000000000: ts = int(ts/1000)
@@ -319,45 +310,46 @@ if raw_data:
             
         # Score
         score_data = db_get_score(conn, fp)
-        if not score_data: missing_score_indices.append(idx)
         
-        processed_list.append({
+        # Lưu vào list để hiển thị
+        item_data = {
             "id": idx, "fp": fp, "ts": ts, "text_en": en_text, "text_disp": disp_text, "score": score_data
-        })
+        }
+        processed_list.append(item_data)
+        
+        # Nếu chưa có điểm thì thêm vào danh sách cần chấm
+        if not score_data:
+            # Thêm trường batch_id để AI biết thứ tự
+            item_data['batch_id'] = len(missing_score_indices) 
+            missing_score_indices.append(item_data)
 
-    # 2. Show UI (Gray Phase)
+    # 2. Show UI (Gray Phase - Loading)
     placeholder = st.empty()
     
-    # 3. AI Run (Only for missing scores)
+    # 3. AI Run (Incremental - Chỉ chạy tin mới)
     if missing_score_indices:
-        # Lọc ra các tin cần chấm điểm
-        batch_input = [processed_list[i] for i in missing_score_indices]
-        
         # Gọi AI với Context thị trường
-        results, model = run_ai_analysis(batch_input, ai_lang, snapshot.get("text", ""))
+        results, model = run_ai_analysis(missing_score_indices, ai_lang, snapshot.get("text", ""))
         
         if results:
-            res_map = {r.get('id'): r for r in results if 'id' in r}
-            for i in missing_score_indices:
-                # Map lại ID batch (0,1,2...) về ID gốc của list
-                # Trong prompt ta gửi ID theo thứ tự 0..N của batch_input
-                # Cần logic map chính xác hơn nếu batch lớn. 
-                # Ở đây đơn giản hóa: AI trả về ID khớp với index trong batch input
-                
-                # Sửa lại logic map ID cho chuẩn batch:
-                batch_idx = missing_score_indices.index(i) # Vị trí trong batch
-                res = res_map.get(batch_idx) # Lấy kết quả
+            # Map kết quả về list chính
+            res_map = {r.get('id'): r for r in results if 'id' in r} # id ở đây là batch_id
+            
+            for item in missing_score_indices:
+                batch_id = item['batch_id']
+                res = res_map.get(batch_id)
                 
                 if res:
                     sc = {"signal": res.get("signal", "SIDEWAY"), 
                           "score": res.get("score", 0), 
                           "reason": res.get("reason", "")}
                     
-                    # Update DB & List
-                    db_set_score(conn, processed_list[i]["fp"], model, sc)
-                    processed_list[i]["score"] = sc
+                    # Update DB
+                    db_set_score(conn, item["fp"], model, sc)
+                    # Update List hiện tại (để hiển thị ngay)
+                    processed_list[item['id']]["score"] = sc
 
-    # 4. Render Final
+    # 4. Render Final (Có màu)
     with placeholder.container():
         scores = []
         display_items = []
@@ -369,21 +361,20 @@ if raw_data:
             val = float(sc.get("score", 0))
             reason = sc.get("reason", "")
             
-            # Logic bỏ qua tin rác (0.0)
-            if val > 0 and sig != "SIDEWAY":
+            # Filter Logic: Chỉ tính điểm tin Valid (Khác 0 và khác Sideway)
+            if val > 0 and "SIDEWAY" not in sig:
                 if sig == "BUY": scores.append(val)
                 elif sig == "SELL": scores.append(-val)
             
-            # Màu sắc
+            # Màu sắc UI
             if sig == "BUY" and val > 0: color = "#10B981"
             elif sig == "SELL" and val > 0: color = "#EF4444"
             else: color = "#6B7280"
             
-            # Time
             t_str = datetime.datetime.fromtimestamp(item["ts"], cur_tz).strftime("%H:%M")
             display_items.append({"time": t_str, "text": item["text_disp"], "sig": sig, "scr": val, "r": reason, "c": color})
 
-        # Dashboard
+        # Dashboard Logic
         avg = statistics.mean(scores) if scores else 0
         if avg > 0.15: trend="BUY GOLD 📈"; clr="#10B981"; msg="DXY/Yields Giảm hoặc Rủi ro tăng"
         elif avg < -0.15: trend="SELL GOLD 📉"; clr="#EF4444"; msg="DXY/Yields Tăng mạnh, Kinh tế tốt"
@@ -397,8 +388,9 @@ if raw_data:
         </div>
         """, unsafe_allow_html=True)
         
-        # List
+        # List Logic
         for item in display_items:
+            # Làm mờ tin rác
             op = "1.0" if item["scr"] > 0 else "0.6"
             st.markdown(f"""
             <div class="news-card" style="border-left: 5px solid {item['c']}; opacity: {op};">
@@ -410,10 +402,12 @@ if raw_data:
             """, unsafe_allow_html=True)
 
 else:
-    st.warning("⚠️ No Data")
+    st.warning("⚠️ No Data. Vui lòng kiểm tra kết nối API.")
 
-# Auto refresh
+# Auto Refresh Countdown (ĐÃ SỬA LỖI NAME ERROR)
 time.sleep(1)
-st.markdown(f"<div class='countdown-bar'>Auto-refresh in {AUTO_REFRESH_SECONDS}s</div>", unsafe_allow_html=True)
-time.sleep(AUTO_REFRESH_SECONDS)
+t = st.empty()
+for i in range(AUTO_REFRESH_SECONDS, 0, -1):
+    t.markdown(f"<div class='countdown-bar'>⏳ Auto-refresh in {i}s</div>", unsafe_allow_html=True)
+    time.sleep(1)
 st.rerun()
