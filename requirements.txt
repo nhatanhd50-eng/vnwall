@@ -5,3 +5,5 @@ transformers
 torch
 statistics
 cerebras_cloud_sdk
+
+yfinance
